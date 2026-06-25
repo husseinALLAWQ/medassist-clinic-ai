@@ -1,36 +1,52 @@
-# MedAssist Clinic AI Starter
+# MedAssist Clinic AI Ultra v3
 
-تطبيق أولي للعيادة يعمل بالذكاء الاصطناعي السحابي.
+نسخة متعددة المراحل كما طلبت:
 
-## ماذا يفعل؟
-1. تدخل الحالة قبل الفحوصات:
-   - يعطي أسئلة للمريض
-   - يقترح فحوصات أولية
-   - يحدد Red flags
-   - يفعّل اختصاصات مثل أعصاب، قلب، روماتيزم، غدد...
+1. Intake:
+   - القصة
+   - الأعراض
+   - الإحساس
+   - الأدوية
+   - الحساسية
+   - vitals
 
-2. ترفع الفحوصات والتقارير والصور:
-   - PDF
-   - صور تقارير
-   - CSV / Excel
-   - Word / TXT
-   - يحلل النتائج ويحدث التشخيص التفريقي
+2. AI Questions:
+   - أسئلة للمريض
+   - red flags
+   - أمان دوائي أولي
 
-## التشغيل المحلي للتجربة
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+3. Clinical Exam:
+   - نصائح للفحص السريري
+   - خانة لإدخال ماذا وجد الطبيب
 
-## على Streamlit Cloud
-ضع المفتاح في Secrets:
+4. Preliminary Dx & Workup:
+   - تحليل بعد الأسئلة والفحص
+   - differential diagnosis
+   - فحوصات وصور مطلوبة حسب الحالة
+
+5. Results:
+   - إدخال labs يدويًا
+   - إدخال MRI/X-ray/CT reports
+   - رفع PDF/images/Excel/CSV/Word
+
+6. Final Support:
+   - تحليل بعد النتائج
+   - updated differential
+   - هل يحتاج فحوصات/صور إضافية
+   - medication support مع موانع وتحذيرات وليس وصفة نهائية
+
+7. Report:
+   - Download report
+   - JSON/Markdown
+
+## Streamlit Secrets
+
+ضع المفتاح في Streamlit secrets:
 
 ```toml
-OPENAI_API_KEY="ضع المفتاح هنا"
+OPENAI_API_KEY = "sk-..."
 ```
 
-## ملاحظات طبية
-- هذا Clinical Decision Support فقط.
-- القرار النهائي للطبيب.
-- استعمل Patient ID بدل اسم المريض كلما أمكن.
-- لا تدخل بيانات تعريفية إلا حسب سياسة العيادة والتصريح.
+## Main file path
+
+`app.py`
