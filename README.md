@@ -1,20 +1,26 @@
-# MedAssist Neuro-General Evidence Guard v4.6
+# MedAssist Neuro-General AutoEvidence Guard v4.7
 
-هذه النسخة تضيف طبقة Evidence Verification قبل إعطاء النتائج.
+هذه النسخة تضيف بحثًا أوتوماتيكيًا في المصادر الطبية المفتوحة قبل إعطاء النتيجة.
 
 ## الجديد
-- Evidence / Guidelines tab
-- Reference notes / guideline excerpts
-- Evidence Verification section داخل كل تحليل
-- يوضح هل التوصية:
-  - verified_from_uploaded_material
-  - framework_based_not_live_checked
-  - not_live_verified
-  - insufficient_evidence
-  - needs_manual_reference_check
-- لا يدّعي أنه بحث live في UpToDate/NICE/AAN/AHA/ESC/IDSA إذا لم يكن هناك Web API أو مرجع مرفوع.
-- يفصل بين guideline-based و clinical reasoning.
-- يحافظ على أسئلة قبل وبعد كل مرحلة من v4.5.
+- Automatic Evidence Web Search
+- بحث تلقائي قبل التحليل عبر OpenAI Responses API web_search tool
+- اختيار نطاق المصادر:
+  - Authoritative medical domains only
+  - Broad web search
+- Evidence search model مستقل، افتراضيًا: gpt-4.1-mini
+- Evidence Verification يميز بين:
+  - automatic_web_search / verified_from_web_search
+  - uploaded_guideline_or_reference / verified_from_uploaded_material
+  - built_in_guideline_framework / framework_based_not_live_checked
+  - clinical_reasoning_only
+  - not_verified_live
+  - needs_specialist_review
+
+## مهم
+- لا يستطيع فتح UpToDate أو مصادر مدفوعة إلا إذا كان لديك وصول مرخص/API خاص.
+- البحث يعتمد على المصادر الطبية المفتوحة والمتاحة على الويب.
+- يجب على الطبيب مراجعة المصادر والحكم النهائي.
 
 ## التسلسل
 1. Intake
@@ -29,10 +35,6 @@
 10. Results / Imaging
 11. Full Review / Medication
 12. Report / Search
-
-## مهم
-هذه النسخة لا تقوم ببحث مباشر على الإنترنت.
-للحصول على تدقيق أقوى، ضع مقتطفات guideline في صفحة Evidence / Guidelines أو ارفع PDF مرجعي في صفحة Results / Imaging.
 
 ## Streamlit Secrets
 

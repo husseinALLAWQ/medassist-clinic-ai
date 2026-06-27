@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General Evidence Guard v4.6
+# MedAssist Neuro-General AutoEvidence Guard v4.7
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General Evidence Guard v4.6",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -86,13 +86,13 @@ class EvidenceVerification(BaseModel):
     clinical_question: str
     recommendation_or_claim: str
     evidence_source_type: Literal[
-        "uploaded_guideline_or_reference", "built_in_guideline_framework",
+        "automatic_web_search", "uploaded_guideline_or_reference", "built_in_guideline_framework",
         "clinical_reasoning_only", "not_verified_live", "needs_specialist_review"
     ]
     reference_name_or_note: str
     evidence_strength: Literal["strong", "moderate", "low", "uncertain"]
     verification_status: Literal[
-        "verified_from_uploaded_material", "framework_based_not_live_checked",
+        "verified_from_web_search", "verified_from_uploaded_material", "framework_based_not_live_checked",
         "not_live_verified", "insufficient_evidence", "needs_manual_reference_check"
     ]
     how_it_changes_recommendation: str
@@ -331,7 +331,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General Evidence Guard v4.6.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -344,7 +344,9 @@ Mandatory rules:
 1. Start with Safety Gate in every stage.
 2. Activate relevant specialty modules.
 3. Before giving final recommendations in any stage, perform Evidence Verification:
-   - If uploaded guideline/reference material is provided, use it and mark verified_from_uploaded_material.
+   - If AUTOMATIC WEB EVIDENCE RESEARCH is present in the context, use it and mark evidence_source_type as automatic_web_search and verification_status as verified_from_web_search when it directly supports the recommendation.
+   - Prefer recent guidelines/systematic reviews/official medical society sources when available.
+   - Preserve source names/citations in reference_name_or_note.
    - If no uploaded reference is provided, do NOT pretend you searched live references.
    - Use built-in clinical framework only as framework_based_not_live_checked.
    - For uncertain/high-risk recommendations, mark needs_manual_reference_check or needs_specialist_review.
@@ -436,7 +438,14 @@ Clinical search question: {data.get("clinical_search")}
 
 REFERENCE / EVIDENCE MATERIAL ENTERED BY DOCTOR
 Reference notes / guideline excerpts: {data.get("reference_notes")}
-Evidence instruction: Use uploaded/reference material if present. If absent, do not claim live search; mark recommendations as framework_based_not_live_checked or not_live_verified.
+
+AUTOMATIC WEB EVIDENCE RESEARCH
+{data.get("automatic_evidence_research")}
+
+Evidence instruction:
+- If automatic web evidence is present and relevant, cite it in evidence_verification.
+- If uploaded/reference material is present, use it.
+- If no evidence text is present, do not claim live search; mark recommendations as framework_based_not_live_checked or not_live_verified.
 
 CHIEF COMPLAINT AND HISTORY
 Chief complaint: {data.get("complaint")}
@@ -509,6 +518,83 @@ def file_item(uploaded_file):
     return {"type": "input_file", "filename": name, "file_data": f"data:{mime};base64,{b64}"}
 
 
+
+AUTHORITATIVE_MEDICAL_DOMAINS = [
+    "nice.org.uk", "nhs.uk", "who.int", "cdc.gov", "nih.gov", "ncbi.nlm.nih.gov",
+    "aan.com", "heart.org", "stroke.org", "acc.org", "escardio.org",
+    "idsociety.org", "thoracic.org", "chestnet.org", "ersnet.org",
+    "diabetes.org", "endocrine.org", "thyroid.org",
+    "kdigo.org", "acr.org", "rheumatology.org", "eular.org",
+    "gastrojournal.org", "acg.gi.org", "aasld.org",
+    "ashpublications.org", "hematology.org",
+    "aafp.org", "bmj.com", "msdmanuals.com",
+    "rcem.ac.uk", "acep.org", "saem.org",
+    "acog.org", "rcog.org.uk",
+    "epilepsy.com", "ilae.org"
+]
+
+
+def build_evidence_query(stage, focus, body_system_focus, context):
+    return f"""
+You are performing automatic evidence search for a clinician-facing clinical decision support app.
+
+Task:
+Search authoritative medical sources for the current clinical problem before recommendations are generated.
+Prioritize guidelines, consensus statements, systematic reviews, and official society/government medical sources.
+Do NOT use forums, random blogs, or low-quality sites.
+Do NOT claim access to paid sources such as UpToDate unless explicitly available in the search result.
+Return concise evidence notes with source names and visible citations.
+
+Clinical focus:
+- Stage: {stage}
+- Neurology focus: {focus}
+- General medicine focus: {body_system_focus}
+
+Patient/case context:
+{context}
+
+Return:
+1. Key guideline/evidence points relevant to triage, red flags, clinical exam, workup, imaging, and medication safety.
+2. What is supported by evidence.
+3. What is uncertain or needs specialist/manual reference check.
+4. Sources/citations.
+"""
+
+
+def run_automatic_evidence_search(stage, focus, body_system_focus, context, evidence_model, source_scope, force_search=True):
+    key = get_api_key()
+    if not key:
+        return "Automatic evidence search skipped: OPENAI_API_KEY is missing."
+
+    client = OpenAI(api_key=key)
+    query = build_evidence_query(stage, focus, body_system_focus, context)
+
+    tool = {"type": "web_search"}
+    if source_scope == "Authoritative medical domains only":
+        tool = {
+            "type": "web_search",
+            "filters": {"allowed_domains": AUTHORITATIVE_MEDICAL_DOMAINS}
+        }
+
+    try:
+        kwargs = dict(
+            model=evidence_model,
+            tools=[tool],
+            input=query,
+        )
+        if force_search:
+            kwargs["tool_choice"] = "required"
+
+        response = client.responses.create(**kwargs)
+        evidence_text = getattr(response, "output_text", None)
+        if not evidence_text:
+            evidence_text = str(response)
+        return evidence_text[:20000]
+    except Exception as e:
+        return f"Automatic evidence search failed. Do not mark recommendations as web-verified. Error: {e}"
+
+
+
 def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
     key = get_api_key()
     if not key:
@@ -536,7 +622,7 @@ def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General Evidence Guard v4.6 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -817,8 +903,11 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General Evidence Guard v4.6")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
+    auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
+    evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
+    evidence_source_scope = st.selectbox("Evidence source scope", ["Authoritative medical domains only", "Broad web search"], index=0)
     strictness = st.selectbox("Safety strictness", ["Very strict", "Strict", "Balanced"], index=0)
     focus = st.selectbox("Neurology focus", [
         "General Neurology",
@@ -858,8 +947,8 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General Evidence Guard v4.6")
-st.caption("الجديد: Evidence Verification قبل النتائج + أسئلة قبل/بعد كل مرحلة + إمكانية إدخال مراجع/Guidelines للتدقيق.")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7")
+st.caption("الجديد: Automatic Evidence Web Search + Evidence Verification + أسئلة قبل/بعد كل مرحلة.")
 
 top = st.columns(10)
 top[0].metric("1", "Intake")
@@ -947,7 +1036,7 @@ with tabs[3]:
         height=180,
         placeholder="مثال: NICE headache guideline excerpt, AAN seizure guidance, AHA syncope/stroke principle, local hospital protocol..."
     )
-    st.info("يمكنك أيضًا رفع PDF أو صورة تقرير في صفحة Results / Imaging. عند وجود مراجع مرفوعة أو مكتوبة، سيحاول ربط التوصيات بها في Evidence Verification.")
+    st.info("إذا كان Automatic Evidence Web Search مفعّلًا، سيبحث التطبيق تلقائيًا في المصادر الطبية المفتوحة قبل التحليل. يمكنك أيضًا رفع PDF أو وضع guideline notes هنا.")
 
 with tabs[6]:
     st.header("⑦ Enter Exam Findings")
@@ -969,9 +1058,11 @@ with tabs[9]:
     if uploaded_files:
         st.success(f"Uploaded {len(uploaded_files)} file(s)")
 
+automatic_evidence_research = st.session_state.get('automatic_evidence_research', '')
+
 def context_now():
     return make_context({
-        "clinical_search": clinical_search, "reference_notes": reference_notes,
+        "clinical_search": clinical_search, "reference_notes": reference_notes, "automatic_evidence_research": automatic_evidence_research,
         "patient_id": patient_id, "age": age, "sex": sex, "pregnancy": pregnancy,
         "setting": setting, "complaint": complaint, "onset": onset, "course": course,
         "quality": quality, "severity": severity, "associated": associated,
@@ -991,6 +1082,26 @@ def analyze_button(label, stage):
     if st.button(label, type="primary", use_container_width=True):
         with st.spinner("AI يحلل..."):
             try:
+                # First build context without fresh evidence
+                ctx_without_fresh_evidence = context_now()
+
+                # Automatic web evidence search before the clinical answer
+                if auto_evidence_search:
+                    with st.spinner("يبحث أوتوماتيكيًا في المصادر الطبية الموثوقة..."):
+                        fresh_evidence = run_automatic_evidence_search(
+                            stage=stage,
+                            focus=focus,
+                            body_system_focus=body_system_focus,
+                            context=ctx_without_fresh_evidence,
+                            evidence_model=evidence_model,
+                            source_scope=evidence_source_scope,
+                            force_search=True,
+                        )
+                    st.session_state["automatic_evidence_research"] = fresh_evidence
+                else:
+                    st.session_state["automatic_evidence_research"] = "Automatic evidence web search disabled by clinician."
+
+                # Rebuild context including evidence text
                 ctx = context_now()
                 a = run_ai(stage, focus, body_system_focus, strictness, ctx, uploaded_files, model)
                 st.session_state[f"analysis_{stage}"] = a
@@ -1043,6 +1154,10 @@ with tabs[11]:
     st.header("⑫ Report / Search")
     search_history = st.text_input("🔎 Search saved reports", placeholder="headache, seizure, chest pain, MRI, patient id...")
     reports = sorted(DATA_DIR.glob("neuro_general_guard_*.md"), reverse=True)
+
+    if st.session_state.get("automatic_evidence_research"):
+        with st.expander("Automatic Evidence Web Search — raw evidence notes"):
+            st.text(st.session_state.get("automatic_evidence_research", "")[:20000])
 
     if "last_analysis" in st.session_state:
         md = report_markdown(st.session_state["last_analysis"])
