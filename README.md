@@ -1,55 +1,47 @@
-# MedAssist Neuro-General AutoEvidence Guard v4.7.2
+# MedAssist Neuro-General AutoEvidence Guard v4.7.3
 
-هذه نسخة Patch بعد اختبار v4.7.1.
+Patch بعد اختبار v4.7.2.
 
-## ما الذي تم إصلاحه؟
-1. Cardiology إجباري إذا يوجد palpitations + near-syncope/presyncope.
-2. TIA لا يجب أن تكون medium/high إذا لا توجد علامات عصبية بؤرية.
-3. تقوية أسئلة ما قبل الفحص في حالات الدوخة والخفقان:
+## ماذا تم إصلاحه؟
+1. Guardrails برمجية بعد جواب AI:
+   - إذا يوجد palpitations + near-syncope/presyncope:
+     - يضيف Cardiology تلقائيًا إذا نسيه النموذج.
+     - يضيف Endocrinology/Metabolic و Toxicology/Medication Safety عند اللزوم.
+     - يزيل تكرار Neurology أو ECG checklist.
+2. تصحيح triage:
+   - near-syncope مع tachycardia وحالة مستقرة = same_day assessment.
+   - Emergency فقط إذا: complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, shock, persistent tachyarrhythmia, SpO2 drop, seizure, focal neurologic deficit, severe new headache.
+3. TIA guardrail:
+   - إذا لا توجد focal neurologic signs والأعراض posture-related مع palpitations:
+     - TIA تصبح low.
+     - لا تكون medium/high.
+4. أسئلة قبل الفحص أصبحت أقوى وإجبارية في palpitations + near-syncope:
    - complete syncope
-   - exertional syncope
-   - chest pain
-   - severe dyspnea
+   - exertional/supine symptoms
+   - chest pain/severe dyspnea
    - sudden onset/offset palpitations
    - family history sudden cardiac death
    - structural heart disease
-   - stimulant/caffeine/decongestant use
+   - stimulants/caffeine/decongestants/QT-risk drugs
    - dehydration/vomiting/diarrhea
    - bleeding/anemia symptoms
    - glucose/diabetes symptoms
-4. تقوية Workup:
+5. Workup guardrails:
    - ECG
    - orthostatic BP/HR
    - capillary glucose
-   - BMP/electrolytes/renal function
-   - CBC when possible anemia/bleeding/fatigue
+   - BMP/electrolytes/renal
+   - CBC conditional
    - TSH conditional
    - Holter/event monitor conditional
-   - Troponin conditional
-   - PE workup conditional
-5. Evidence Verification أصبح يطلب:
-   - source title
-   - organization
-   - year/date
-   - URL/citation
-   - exact evidence point
-   - caution/limitation
-6. ER threshold أقوى:
-   - complete syncope
-   - exertional syncope
-   - chest pain
-   - severe dyspnea
-   - abnormal ECG
-   - hypotension/shock
-   - persistent tachyarrhythmia
-   - focal neurologic deficit
-   - severe new headache
-   - seizure
-   - SpO2 drop
+6. Evidence guardrail:
+   - إذا TIA evidence غير مناسب أو citation mismatch، يصبح needs_manual_reference_check.
+7. إصلاح خطأ Streamlit frontend في Follow-up questions:
+   - استبدلنا HTML unsafe داخل render_questions بعرض Streamlit بسيط ومستقر.
 
 ## مهم
-- البحث في المصادر الطبية المفتوحة.
-- لا يفتح UpToDate أو مصادر مدفوعة إلا إذا توفر وصول مرخص/API.
+- البحث في المصادر الطبية المفتوحة فقط.
+- لا يفتح UpToDate أو مصادر مدفوعة إلا بترخيص/API.
 - القرار النهائي للطبيب.
 
 ## Streamlit Secrets

@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.2.1
+# MedAssist Neuro-General AutoEvidence Guard v4.7.3.1
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.2.1",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.3.1",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -349,7 +349,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.2.1.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.3.1.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -656,11 +656,237 @@ def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
 
 
 # =========================================================
+# Deterministic guardrails
+# These are applied AFTER the model output so critical workflow rules
+# cannot be ignored by the AI response.
+# =========================================================
+
+def _lc(x):
+    return (x or "").lower()
+
+
+def _has_any(text, phrases):
+    t = _lc(text)
+    return any(p.lower() in t for p in phrases)
+
+
+def _module_present(a, module_name):
+    return any(m.module == module_name for m in a.activated_modules)
+
+
+def _dedupe_by_key(items, key_fn):
+    seen = set()
+    out = []
+    for item in items:
+        key = key_fn(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _append_question_if_missing(question_list, question, stage, domain, why, impact, priority="must_ask_now"):
+    q_text = question.lower()
+    if not any(q_text[:28] in _lc(q.question) or _lc(q.question)[:28] in q_text for q in question_list):
+        question_list.append(StageQuestion(
+            question=question,
+            stage=stage,
+            domain=domain,
+            why_ask=why,
+            how_answer_changes_decision=impact,
+            priority=priority
+        ))
+
+
+def _append_workup_if_missing(a, test_name, type_, priority, why, changes, avoid):
+    key = test_name.lower()
+    if not any(key in _lc(w.test_or_action) for w in a.recommended_workup):
+        a.recommended_workup.append(WorkupItem(
+            test_or_action=test_name,
+            type=type_,
+            priority=priority,
+            why_needed=why,
+            what_result_changes=changes,
+            avoid_if_not_indicated=avoid
+        ))
+
+
+def _append_followup_if_missing(a, situation, action, timeframe):
+    key = situation.lower()
+    if not any(key in _lc(f.situation) for f in a.follow_up_thresholds):
+        a.follow_up_thresholds.append(FollowUpThreshold(
+            situation=situation,
+            action=action,
+            timeframe=timeframe
+        ))
+
+
+def _no_focal_neuro_context(context):
+    t = _lc(context)
+    absent_markers = [
+        "no focal", "no weakness", "no numbness", "no speech", "no vision loss",
+        "no diplopia", "no ataxia", "no focal neurological deficits",
+        "no focal neurologic", "لا يوجد ضعف", "لا يوجد تنميل", "لا يوجد اضطراب كلام",
+        "لا يوجد فقدان نظر", "لا يوجد علامات عصبية بؤرية"
+    ]
+    positive_focal = [
+        "unilateral weakness", "aphasia", "dysarthria", "vision loss", "diplopia",
+        "ataxia", "hemiparesis", "focal deficit", "فقدان نظر", "حبسة", "ضعف جهة",
+        "ترنح", "ازدواجية الرؤية"
+    ]
+    return _has_any(t, absent_markers) and not _has_any(t, positive_focal)
+
+
+def _emergency_trigger_present(context):
+    t = _lc(context)
+    # Positive emergency markers. Negated phrases below prevent false triggers.
+    if "no chest pain" not in t and ("chest pain" in t or "ألم صدر" in t):
+        return True
+    if "no complete loss" not in t and ("complete loss of consciousness" in t or "complete syncope" in t):
+        return True
+    if "no seizure" not in t and ("seizure" in t or "tongue bite" in t or "incontinence" in t):
+        return True
+    if "no focal" not in t and ("focal neurologic" in t or "focal neurological" in t):
+        return True
+    if "severe dyspnea" in t or "severe shortness of breath" in t or "spo2 8" in t or "spo2 7" in t:
+        return True
+    if "abnormal ecg" in t or "hypotension/shock" in t or "shock" in t:
+        return True
+    if "exertional syncope" in t or "syncope during exertion" in t:
+        return True
+    return False
+
+
+def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnalysis:
+    t = _lc(context)
+
+    palpitations = _has_any(t, ["palpitations", "palpitation", "خفقان"])
+    presyncope = _has_any(t, ["near-syncope", "presyncope", "near faint", "near-faint", "may faint", "قرب الإغماء", "قرب الاغماء"])
+    posture_related = _has_any(t, ["worse when standing", "worsened by standing", "improves when sitting", "عند الوقوف", "يتحسن عند الجلوس"])
+    no_focal = _no_focal_neuro_context(t)
+
+    # Always deduplicate modules/checklists first.
+    a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
+    a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
+
+    if palpitations and presyncope:
+        # Force same-day Cardiology module.
+        if not _module_present(a, "Cardiology"):
+            a.activated_modules.insert(0, ActivatedModule(
+                module="Cardiology",
+                urgency="same_day",
+                why_activated="Palpitations with near-syncope/presyncope require same-day cardiac rhythm evaluation and ECG."
+            ))
+
+        # Add supporting modules if absent.
+        if not _module_present(a, "Endocrinology/Metabolic"):
+            a.activated_modules.append(ActivatedModule(
+                module="Endocrinology/Metabolic",
+                urgency="same_day",
+                why_activated="Hypoglycemia, electrolyte disturbance, and thyroid disease can mimic dizziness/palpitations."
+            ))
+        if not _module_present(a, "Toxicology/Medication Safety"):
+            a.activated_modules.append(ActivatedModule(
+                module="Toxicology/Medication Safety",
+                urgency="same_day",
+                why_activated="Stimulants, decongestants, caffeine, QT-risk drugs, and medication adverse effects must be reviewed."
+            ))
+
+        # Downgrade emergency to same_day if stable and no emergency trigger.
+        if a.safety_gate.emergency_now == "yes" and not _emergency_trigger_present(t):
+            a.safety_gate.emergency_now = "no"
+            a.safety_gate.same_day_assessment_needed = "yes"
+            a.safety_gate.reason = (
+                "Palpitations with near-syncope require same-day ECG and orthostatic/metabolic evaluation. "
+                "Emergency escalation is required if complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, shock, or focal neurologic deficit appears."
+            )
+            a.triage_level = "same_day"
+            a.triage_reason = a.safety_gate.reason
+
+        # Ensure must-not-miss list has cardiac priority.
+        for condition in ["Serious arrhythmia", "Orthostatic hypotension", "Hypoglycemia", "Anemia/bleeding", "Electrolyte disturbance"]:
+            if condition not in a.safety_gate.must_not_miss_conditions:
+                a.safety_gate.must_not_miss_conditions.append(condition)
+
+        # Strong pre-exam questions.
+        q = a.questions_before_exam
+        _append_question_if_missing(q, "Did the patient have complete syncope or only near-syncope/presyncope?", "before_exam", "cardiology",
+                                    "Complete syncope increases risk and changes triage.", "Complete syncope, especially recurrent or injurious, increases urgency.")
+        _append_question_if_missing(q, "Did symptoms occur during exertion or while supine?", "before_exam", "cardiology",
+                                    "Exertional or supine syncope is a higher-risk cardiac pattern.", "If yes, escalate cardiac evaluation urgently.")
+        _append_question_if_missing(q, "Is there chest pain, severe shortness of breath, or new diaphoresis?", "before_exam", "cardiology",
+                                    "These can indicate ACS, arrhythmia, PE, or unstable cardiopulmonary disease.", "If present, emergency pathway and troponin/ACS/PE evaluation may be needed.")
+        _append_question_if_missing(q, "Do palpitations start and stop suddenly, and how fast is the pulse during the episode?", "before_exam", "cardiology",
+                                    "Sudden onset/offset suggests paroxysmal arrhythmia.", "May trigger rhythm monitoring/Holter/event monitor even if initial ECG is normal.")
+        _append_question_if_missing(q, "Is there family history of sudden cardiac death or known structural heart disease?", "before_exam", "cardiology",
+                                    "Family/structural risk increases concern for dangerous arrhythmia.", "If positive, lowers threshold for urgent cardiology review.")
+        _append_question_if_missing(q, "Any caffeine, stimulants, decongestants, thyroid medications, recreational drugs, or QT-risk drugs?", "before_exam", "medication_safety",
+                                    "Substances and medications can provoke tachycardia or arrhythmia.", "May redirect management toward medication/substance review.")
+        _append_question_if_missing(q, "Any vomiting, diarrhea, poor intake, dehydration, or recent heat exposure?", "before_exam", "general_medicine",
+                                    "Volume depletion can cause orthostatic symptoms.", "If positive, supports orthostatic vitals and fluid status assessment.")
+        _append_question_if_missing(q, "Any bleeding, melena, heavy menses, pallor, or progressive fatigue suggesting anemia?", "before_exam", "hematology",
+                                    "Anemia/bleeding can cause tachycardia, dizziness, and presyncope.", "If positive, CBC and bleeding evaluation become higher priority.")
+        _append_question_if_missing(q, "Was capillary glucose checked during symptoms or is there diabetes/fasting/recent diet change?", "before_exam", "endocrine_metabolic",
+                                    "Hypoglycemia can mimic dizziness/palpitations.", "Low glucose changes immediate management.")
+
+        # Workup guardrails.
+        _append_workup_if_missing(a, "Capillary blood glucose", "bedside_test", "urgent",
+                                  "Hypoglycemia can cause dizziness, palpitations, and presyncope.", "Low glucose requires immediate correction.", "Do not delay if patient is symptomatic.")
+        _append_workup_if_missing(a, "CBC", "lab", "important",
+                                  "Screens for anemia/bleeding/infection when dizziness with tachycardia is present.", "Anemia or leukocytosis redirects evaluation.", "May be less urgent if no anemia/bleeding/systemic clues and patient is stable.")
+        _append_workup_if_missing(a, "TSH if recurrent palpitations or unexplained persistent tachycardia", "lab", "routine",
+                                  "Hyperthyroidism can cause palpitations and tachycardia.", "Abnormal TSH changes outpatient endocrine/cardiac follow-up.", "Not a substitute for ECG or urgent evaluation.")
+        _append_workup_if_missing(a, "Holter/event monitor if ECG is normal but episodes recur", "monitoring", "important",
+                                  "Intermittent arrhythmias may be missed on a single ECG.", "Captured rhythm during symptoms can confirm arrhythmia.", "Not first-line replacement for immediate ECG in current symptoms.")
+
+        # TIA guardrail.
+        if no_focal and posture_related:
+            for d in a.differential_diagnosis:
+                if "transient ischemic" in _lc(d.diagnosis_or_category) or "tia" in _lc(d.diagnosis_or_category):
+                    d.probability = "low"
+                    if "No focal neurological deficits; symptoms are posture-related with palpitations." not in d.features_against:
+                        d.features_against.append("No focal neurological deficits; symptoms are posture-related with palpitations.")
+                    d.confirm_or_exclude_step = (
+                        "Do not prioritize TIA unless focal neurologic symptoms appear "
+                        "(weakness, speech disturbance, vision loss/diplopia, ataxia) or the clinical picture changes."
+                    )
+
+        # Referral / ER thresholds.
+        a.referral_or_er_threshold = (
+            "Immediate ER/cardiology escalation if complete syncope, exertional syncope, chest pain, severe dyspnea, "
+            "abnormal ECG, hypotension/shock, persistent tachyarrhythmia, SpO2 drop, seizure, new severe headache, "
+            "or any focal neurologic deficit. Otherwise same-day ECG, orthostatic vitals, glucose/electrolytes, and follow-up based on results."
+        )
+        _append_followup_if_missing(a, "Complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, hypotension, persistent tachyarrhythmia, SpO2 drop, seizure, or focal neurologic deficit",
+                                    "Immediate ER/cardiology escalation.", "immediate_ER")
+
+        # Evidence guardrail for TIA overclaim/mismatched citations.
+        for ev in a.evidence_verification:
+            ev_all = " ".join([_lc(ev.clinical_question), _lc(ev.recommendation_or_claim), _lc(ev.source_title), _lc(ev.reference_name_or_note), _lc(ev.source_url_or_citation)])
+            if ("tia" in ev_all or "transient ischemic" in ev_all) and no_focal:
+                ev.evidence_strength = "low"
+                ev.verification_status = "needs_manual_reference_check"
+                ev.how_it_changes_recommendation = "In this case, absence of focal neurologic signs makes TIA lower priority than cardiac/orthostatic/metabolic causes."
+                ev.caution = "Do not treat nonspecific dizziness/presyncope as TIA unless focal neurologic deficits or a true TIA syndrome appears."
+            if "pmc3295536" in _lc(ev.source_url_or_citation) and ("tia" in _lc(ev.source_title) or "transient ischemic" in _lc(ev.source_title)):
+                ev.verification_status = "needs_manual_reference_check"
+                ev.caution = "Potential citation mismatch: verify that the URL actually matches the stated TIA source before relying on it."
+
+    # Final dedupe again.
+    a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
+    a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
+    a.recommended_workup = _dedupe_by_key(a.recommended_workup, lambda w: (w.type, w.test_or_action.lower()))
+    a.follow_up_thresholds = _dedupe_by_key(a.follow_up_thresholds, lambda f: (f.timeframe, f.situation.lower()))
+    return a
+
+
+# =========================================================
 # Report/render
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.2.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.3.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -678,15 +904,12 @@ def save_report(context, a):
 def render_questions(title, questions):
     if questions:
         st.subheader(title)
-        for q in questions:
-            st.markdown(f"""
-            <div class='question-box'>
-            <b>{q.priority} / {q.domain}</b><br>
-            <b>Question:</b> {q.question}<br>
-            <b>Why:</b> {q.why_ask}<br>
-            <b>How answer changes decision:</b> {q.how_answer_changes_decision}
-            </div>
-            """, unsafe_allow_html=True)
+        for idx, q in enumerate(questions, start=1):
+            st.markdown(f"**{idx}. {q.priority} / {q.domain}**")
+            st.write("**Question:**", q.question)
+            st.write("**Why:**", q.why_ask)
+            st.write("**How answer changes decision:**", q.how_answer_changes_decision)
+            st.divider()
 
 
 def render(a):
@@ -946,7 +1169,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.2")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.3")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
@@ -990,8 +1213,8 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.2.1")
-st.caption("الجديد: Patch v4.7.2 — Cardiology إجباري مع near-syncope + تخفيض TIA بدون علامات عصبية + Evidence أوضح.")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.3.1")
+st.caption("الجديد: v4.7.3 — Guardrails برمجية بعد جواب AI: Cardiology إجباري، إزالة التكرار، إصلاح TIA، وإصلاح عرض الأسئلة.")
 
 top = st.columns(10)
 top[0].metric("1", "Intake")
@@ -1147,6 +1370,7 @@ def analyze_button(label, stage):
                 # Rebuild context including evidence text
                 ctx = context_now()
                 a = run_ai(stage, focus, body_system_focus, strictness, ctx, uploaded_files, model)
+                a = apply_deterministic_guardrails(a, ctx)
                 st.session_state[f"analysis_{stage}"] = a
                 st.session_state["last_analysis"] = a
                 st.session_state["last_context"] = ctx
