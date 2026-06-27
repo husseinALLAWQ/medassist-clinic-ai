@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General Guard v4.3
-# Neurology-first + General Medicine coverage
+# MedAssist Neuro-General Evidence Guard v4.6
+# Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General Guard v4.3",
+    page_title="MedAssist Neuro-General Evidence Guard v4.6",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -47,6 +47,7 @@ st.markdown("""
 .orange-box {border-left:5px solid #fd9644;padding:11px 14px;border-radius:9px;background:rgba(253,150,68,.10);margin-bottom:8px;}
 .green-box {border-left:5px solid #00b894;padding:11px 14px;border-radius:9px;background:rgba(0,184,148,.10);margin-bottom:8px;}
 .gray-box {border-left:5px solid #95a5a6;padding:11px 14px;border-radius:9px;background:rgba(149,165,166,.10);margin-bottom:8px;}
+.question-box {border-left:5px solid #9b59b6;padding:11px 14px;border-radius:9px;background:rgba(155,89,182,.10);margin-bottom:8px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,6 +81,25 @@ class ReferenceAnchor(BaseModel):
     how_it_applies_here: str
 
 
+
+class EvidenceVerification(BaseModel):
+    clinical_question: str
+    recommendation_or_claim: str
+    evidence_source_type: Literal[
+        "uploaded_guideline_or_reference", "built_in_guideline_framework",
+        "clinical_reasoning_only", "not_verified_live", "needs_specialist_review"
+    ]
+    reference_name_or_note: str
+    evidence_strength: Literal["strong", "moderate", "low", "uncertain"]
+    verification_status: Literal[
+        "verified_from_uploaded_material", "framework_based_not_live_checked",
+        "not_live_verified", "insufficient_evidence", "needs_manual_reference_check"
+    ]
+    how_it_changes_recommendation: str
+    caution: str
+
+
+
 class MissingCriticalData(BaseModel):
     item: str
     why_required: str
@@ -93,8 +113,12 @@ class ChecklistItem(BaseModel):
     action_if_present_or_unknown: str
 
 
-class MandatoryQuestion(BaseModel):
+class StageQuestion(BaseModel):
     question: str
+    stage: Literal[
+        "before_exam", "after_exam", "before_labs_imaging", "after_labs_imaging",
+        "before_medication", "after_medication_safety", "general_followup"
+    ]
     domain: Literal[
         "neurology", "general_medicine", "cardiology", "pulmonology", "infection",
         "endocrine_metabolic", "rheumatology", "renal_urology", "gastro_hepato",
@@ -115,16 +139,19 @@ class RedFlag(BaseModel):
     urgency: Literal["emergency", "same_day", "soon", "routine"]
 
 
-class ExamChecklistItem(BaseModel):
-    exam_item: str
-    system: Literal[
-        "neurologic", "cardiovascular", "respiratory", "abdominal", "ENT",
-        "MSK", "skin", "rheumatologic", "psychiatric", "general_vitals", "other"
+class ExamProtocolStep(BaseModel):
+    exam_section: Literal[
+        "general_vitals", "neurologic", "cardiovascular", "respiratory", "abdominal",
+        "ENT", "MSK", "skin", "rheumatologic", "psychiatric", "orthostatic_vitals",
+        "bedside_tests", "other"
     ]
-    how_to_do_it_briefly: str
-    what_to_record: List[str] = Field(default_factory=list)
-    abnormal_meaning: str
-    normal_does_not_exclude: str
+    exam_item: str
+    patient_position_or_setup: str
+    how_to_perform_step_by_step: List[str] = Field(default_factory=list)
+    what_to_record_exactly: List[str] = Field(default_factory=list)
+    normal_expected_finding: str
+    abnormal_findings_and_meaning: List[str] = Field(default_factory=list)
+    safety_precaution_or_stop_condition: str
     priority: Literal["must_do_now", "important", "routine"]
 
 
@@ -230,9 +257,17 @@ class GuardAnalysis(BaseModel):
     activated_modules: List[ActivatedModule] = Field(default_factory=list)
     missing_critical_data: List[MissingCriticalData] = Field(default_factory=list)
     guideline_checklist: List[ChecklistItem] = Field(default_factory=list)
-    mandatory_questions: List[MandatoryQuestion] = Field(default_factory=list)
+
+    questions_before_exam: List[StageQuestion] = Field(default_factory=list)
+    questions_after_exam: List[StageQuestion] = Field(default_factory=list)
+    questions_before_labs_imaging: List[StageQuestion] = Field(default_factory=list)
+    questions_after_labs_imaging: List[StageQuestion] = Field(default_factory=list)
+    questions_before_medication: List[StageQuestion] = Field(default_factory=list)
+    questions_after_medication_safety: List[StageQuestion] = Field(default_factory=list)
+    followup_questions: List[StageQuestion] = Field(default_factory=list)
+
     red_flags: List[RedFlag] = Field(default_factory=list)
-    exam_checklist: List[ExamChecklistItem] = Field(default_factory=list)
+    detailed_exam_protocol: List[ExamProtocolStep] = Field(default_factory=list)
     exam_interpretation: List[ExamInterpretationItem] = Field(default_factory=list)
     recommended_workup: List[WorkupItem] = Field(default_factory=list)
     imaging_decision: List[ImagingDecision] = Field(default_factory=list)
@@ -242,6 +277,7 @@ class GuardAnalysis(BaseModel):
     treatment_support_after_results: List[TreatmentSupport] = Field(default_factory=list)
     follow_up_thresholds: List[FollowUpThreshold] = Field(default_factory=list)
     trusted_reference_anchors: List[ReferenceAnchor] = Field(default_factory=list)
+    evidence_verification: List[EvidenceVerification] = Field(default_factory=list)
     quality_control: QualityControl
     strict_quality_check: str
     what_to_do_now: str
@@ -253,30 +289,35 @@ class GuardAnalysis(BaseModel):
 
 
 # =========================================================
-# Prompt framework
+# Prompts
 # =========================================================
 
 REFERENCE_FRAMEWORK = """
-Clinical decision-support framework to apply:
+Clinical decision-support framework:
 A) Universal Safety Gate:
-- unstable vitals, altered mental status, severe respiratory distress, chest pain concerning for ACS,
+- unstable vitals, altered mental status, severe respiratory distress, ACS-like chest pain,
   stroke/TIA signs, sepsis/meningitis signs, anaphylaxis, severe dehydration/shock,
   severe trauma, overdose/toxicity, pregnancy emergency, suicidal/homicidal risk -> escalate.
-B) Neurology modules:
-- headache/raised ICP/CSF leak, seizure/syncope, stroke/TIA, vertigo/dizziness, neuropathy,
+B) Neurology:
+- headache/raised ICP/CSF leak, seizure/syncope, stroke/TIA, dizziness/vertigo, neuropathy,
   myelopathy/radiculopathy, movement disorders, cognitive/psychiatric overlap.
 C) General medicine mimics:
-- hypoglycemia/electrolyte disturbance, thyroid disease, anemia, infection, autoimmune/inflammatory,
-  cardiac arrhythmia/ACS, PE, medication adverse effect, intoxication/withdrawal, renal/hepatic disease.
+- hypoglycemia/electrolytes, thyroid, anemia, infection, autoimmune/inflammatory,
+  arrhythmia/ACS, PE, medication adverse effect, intoxication/withdrawal, renal/hepatic disease.
 D) Headache:
-- Use SNNOOP10 red flags and migraine/tension phenotype, but do not make the whole system headache-only.
-E) Imaging:
+- Use SNNOOP10 red flags and migraine/tension phenotype when headache is relevant.
+E) Near-syncope/palpitations:
+- Always consider arrhythmia, orthostatic hypotension, vasovagal syncope, hypoglycemia, anemia,
+  thyroid disease, dehydration, PE/ACS when supported.
+- Always activate Cardiology when palpitations + near-syncope are present.
+- Do not rank TIA medium/high without focal neurologic symptoms.
+F) Imaging:
 - Avoid routine imaging when not indicated. Do not miss imaging when emergency red flags exist.
-F) Medication safety:
+G) Medication safety:
 - Always consider allergy, pregnancy/postpartum, age, renal/liver disease, anticoagulants/antiplatelets,
   QT risk, sedatives/opioids/benzodiazepines, serotonin syndrome risk, NSAID bleeding/renal risk,
   antiepileptic adverse effects, medication overuse headache.
-G) Treatment support:
+H) Treatment support:
 - Provide classes/options and safety checks only. No doses. No final prescription.
 """
 
@@ -290,30 +331,40 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General Guard v4.3.
+You are MedAssist Neuro-General Evidence Guard v4.6.
 
 Identity:
-- Neurology-first but NOT neurology-only.
-- You must cover all neurological diseases AND general medicine mimics/causes.
-- You act as clinical decision support for a clinician, not a final diagnostic authority.
+- Neurology-first but not neurology-only.
+- You cover neurological diseases and general medicine mimics/causes.
+- You are clinical decision support for a clinician, not a final diagnosis authority.
 
 Strictness level: {strictness}
 
 Mandatory rules:
 1. Start with Safety Gate in every stage.
-2. Activate relevant specialty modules, not just neurology.
-3. If the case is neurologic, deeply analyze neurological localization and differentials.
-4. If symptoms may be non-neurologic, analyze general medicine causes and mimics.
-5. Always ask missing critical questions before ranking too confidently.
-6. Always provide exam checklist across relevant systems, not only neuro if another system is relevant.
-7. Always interpret entered exam findings clearly.
-8. Imaging must be justified. Do not over-order CT/MRI/X-ray.
-9. Do not miss dangerous conditions: stroke/TIA, SAH, meningitis/encephalitis, raised ICP, seizure emergency,
-   ACS, arrhythmia/syncope, PE, sepsis, hypoglycemia, DKA, severe electrolyte abnormalities, drug toxicity,
-   pregnancy/postpartum emergencies, suicidal risk, trauma/bleeding.
-10. Medication safety must appear whenever meds/allergies/risks are entered.
-11. Treatment support must never include dosing; use medication classes/options, contraindications, checks, monitoring.
-12. Use clean Arabic medical language with English medical terms when useful. Use "SOAP" not mistranslations.
+2. Activate relevant specialty modules.
+3. Before giving final recommendations in any stage, perform Evidence Verification:
+   - If uploaded guideline/reference material is provided, use it and mark verified_from_uploaded_material.
+   - If no uploaded reference is provided, do NOT pretend you searched live references.
+   - Use built-in clinical framework only as framework_based_not_live_checked.
+   - For uncertain/high-risk recommendations, mark needs_manual_reference_check or needs_specialist_review.
+   - Clearly separate guideline-based statements from clinical reasoning.
+4. Always produce staged questions when relevant:
+   - questions_before_exam
+   - questions_after_exam
+   - questions_before_labs_imaging
+   - questions_after_labs_imaging
+   - questions_before_medication
+   - questions_after_medication_safety
+   - followup_questions
+5. These questions must be specific to the current case and the current stage.
+6. If the stage is "exam_protocol", tell the doctor HOW to perform detailed clinical exam step by step before exam results.
+7. If exam findings are entered, interpret them clearly.
+8. If results are entered, generate questions_after_labs_imaging that depend on those results.
+9. If treatment/medication support is considered, generate questions_before_medication and medication safety questions.
+10. Imaging must be justified. Avoid over-testing and under-testing.
+11. Medication support must never include dosing.
+12. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
 13. Return exactly according to schema.
 
 {REFERENCE_FRAMEWORK}
@@ -323,37 +374,51 @@ Mandatory rules:
 def stage_instruction(stage, focus, body_system_focus):
     if stage == "questions":
         return f"""
-STAGE 1 — Questions + Safety Gate.
-Generate mandatory questions for neuro and general medicine, red flags, missing data, module routing, medication safety.
+STAGE 1 — Questions Before Exam.
+Generate questions_before_exam strongly, plus missing critical data, red flags, modules, medication safety.
+Also include questions_before_labs_imaging if early workup is likely.
 Neurology focus: {focus}
-General body-system focus: {body_system_focus}
+General medicine focus: {body_system_focus}
 """
-    if stage == "exam":
+    if stage == "exam_protocol":
         return f"""
-STAGE 2 — Exam Advisor.
-Generate clinical exam checklist across neurology and relevant general medicine systems, then interpret entered findings.
+STAGE 2 — Detailed Exam Protocol Before Findings.
+Generate detailed_exam_protocol and questions_before_exam.
+Tell clinician HOW to perform exam before results are entered.
 Neurology focus: {focus}
-General body-system focus: {body_system_focus}
+General medicine focus: {body_system_focus}
+"""
+    if stage == "exam_interpretation":
+        return f"""
+STAGE 3 — Interpret Entered Exam Findings.
+Interpret exam findings.
+Generate questions_after_exam and questions_before_labs_imaging based on the exam.
+Neurology focus: {focus}
+General medicine focus: {body_system_focus}
 """
     if stage == "preliminary":
         return f"""
-STAGE 3 — Preliminary Differential + Workup.
-Use history/exam. Provide differential across neurology and general medicine, strict imaging/workup decision, quality control.
+STAGE 4 — Dx and Workup Before Results.
+Use history and exam. Generate differential, workup, imaging decision.
+Generate evidence_verification for major diagnostic/workup/imaging recommendations.
+Generate questions_before_labs_imaging and questions_before_medication if treatment might be considered.
 Neurology focus: {focus}
-General body-system focus: {body_system_focus}
+General medicine focus: {body_system_focus}
 """
     if stage == "results":
         return f"""
-STAGE 4 — Results Review + Medication Support.
-Interpret labs/imaging/reports across neuro and general medicine. Update differential and treatment support without dosing.
+STAGE 5 — Results Review.
+Interpret labs/imaging/reports.
+Generate evidence_verification for major result interpretations and treatment safety recommendations.
+Generate questions_after_labs_imaging, questions_before_medication, questions_after_medication_safety.
 Neurology focus: {focus}
-General body-system focus: {body_system_focus}
+General medicine focus: {body_system_focus}
 """
     return f"""
-STAGE 5 — Full Neuro-General Guard Review.
-Full safety-gated, multi-specialty clinical decision support report.
+STAGE 6 — Full Review.
+Use all data and fill all staged question sections where relevant. Include evidence_verification for all major recommendations.
 Neurology focus: {focus}
-General body-system focus: {body_system_focus}
+General medicine focus: {body_system_focus}
 """
 
 
@@ -368,6 +433,10 @@ Setting: {data.get("setting")}
 
 CLINICAL SEARCH / DOCTOR FOCUS
 Clinical search question: {data.get("clinical_search")}
+
+REFERENCE / EVIDENCE MATERIAL ENTERED BY DOCTOR
+Reference notes / guideline excerpts: {data.get("reference_notes")}
+Evidence instruction: Use uploaded/reference material if present. If absent, do not claim live search; mark recommendations as framework_based_not_live_checked or not_live_verified.
 
 CHIEF COMPLAINT AND HISTORY
 Chief complaint: {data.get("complaint")}
@@ -410,6 +479,7 @@ Cardiovascular/respiratory exam: {data.get("cardio_resp_exam")}
 Abdominal/renal exam: {data.get("abd_renal_exam")}
 ENT/MSK/skin/rheum exam: {data.get("ent_msk_skin_exam")}
 Psychiatric/cognitive exam: {data.get("psych_exam")}
+Other exam findings: {data.get("other_exam")}
 
 RESULTS
 Labs: {data.get("labs")}
@@ -466,7 +536,7 @@ def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General Guard v4.3 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General Evidence Guard v4.6 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -479,6 +549,20 @@ def save_report(context, a):
         "analysis": a.model_dump()
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return md
+
+
+def render_questions(title, questions):
+    if questions:
+        st.subheader(title)
+        for q in questions:
+            st.markdown(f"""
+            <div class='question-box'>
+            <b>{q.priority} / {q.domain}</b><br>
+            <b>Question:</b> {q.question}<br>
+            <b>Why:</b> {q.why_ask}<br>
+            <b>How answer changes decision:</b> {q.how_answer_changes_decision}
+            </div>
+            """, unsafe_allow_html=True)
 
 
 def render(a):
@@ -534,12 +618,13 @@ def render(a):
             </div>
             """, unsafe_allow_html=True)
 
-    if a.mandatory_questions:
-        st.subheader("Mandatory Questions")
-        for q in a.mandatory_questions:
-            with st.expander(f"{q.priority} / {q.domain} — {q.question}"):
-                st.write("**Why ask:**", q.why_ask)
-                st.write("**Decision impact:**", q.how_answer_changes_decision)
+    render_questions("Questions BEFORE clinical exam", a.questions_before_exam)
+    render_questions("Questions AFTER exam findings", a.questions_after_exam)
+    render_questions("Questions BEFORE labs/imaging", a.questions_before_labs_imaging)
+    render_questions("Questions AFTER labs/imaging results", a.questions_after_labs_imaging)
+    render_questions("Questions BEFORE medication/treatment", a.questions_before_medication)
+    render_questions("Questions AFTER medication safety review", a.questions_after_medication_safety)
+    render_questions("Follow-up questions", a.followup_questions)
 
     if a.red_flags:
         st.subheader("Red Flags")
@@ -552,16 +637,19 @@ def render(a):
             </div>
             """, unsafe_allow_html=True)
 
-    if a.exam_checklist:
-        st.subheader("Clinical Exam Advisor")
-        for e in a.exam_checklist:
+    if a.detailed_exam_protocol:
+        st.subheader("Detailed Clinical Exam Protocol — كيف تعمل الفحص؟")
+        for e in a.detailed_exam_protocol:
             st.markdown(f"""
             <div class='blue-box'>
-            <b>{e.priority} / {e.system}: {e.exam_item}</b><br>
-            <b>How:</b> {e.how_to_do_it_briefly}<br>
-            <b>Record:</b> {", ".join(e.what_to_record) if e.what_to_record else "—"}<br>
-            <b>Abnormal meaning:</b> {e.abnormal_meaning}<br>
-            <b>Normal does not exclude:</b> {e.normal_does_not_exclude}
+            <b>{e.priority} / {e.exam_section}: {e.exam_item}</b><br>
+            <b>Patient position/setup:</b> {e.patient_position_or_setup}<br>
+            <b>How to perform:</b><br>
+            {"<br>".join([str(i+1) + ". " + step for i, step in enumerate(e.how_to_perform_step_by_step)]) if e.how_to_perform_step_by_step else "—"}<br>
+            <b>Record exactly:</b> {", ".join(e.what_to_record_exactly) if e.what_to_record_exactly else "—"}<br>
+            <b>Normal expected:</b> {e.normal_expected_finding}<br>
+            <b>Abnormal meaning:</b> {", ".join(e.abnormal_findings_and_meaning) if e.abnormal_findings_and_meaning else "—"}<br>
+            <b>Safety/stop condition:</b> {e.safety_precaution_or_stop_condition}
             </div>
             """, unsafe_allow_html=True)
 
@@ -673,6 +761,23 @@ def render(a):
         for ref in a.trusted_reference_anchors:
             st.info(f"**{ref.source_or_framework}:** {ref.principle_used} → {ref.how_it_applies_here}")
 
+    if a.evidence_verification:
+        st.subheader("Evidence Verification — تدقيق المرجع قبل النتيجة")
+        for ev in a.evidence_verification:
+            box = "green-box" if ev.verification_status == "verified_from_uploaded_material" else ("orange-box" if ev.verification_status in ["framework_based_not_live_checked", "not_live_verified"] else "red-box")
+            st.markdown(f"""
+            <div class='{box}'>
+            <b>Clinical question:</b> {ev.clinical_question}<br>
+            <b>Recommendation/claim:</b> {ev.recommendation_or_claim}<br>
+            <b>Source type:</b> {ev.evidence_source_type}<br>
+            <b>Reference:</b> {ev.reference_name_or_note}<br>
+            <b>Evidence strength:</b> {ev.evidence_strength}<br>
+            <b>Verification status:</b> {ev.verification_status}<br>
+            <b>Impact:</b> {ev.how_it_changes_recommendation}<br>
+            <b>Caution:</b> {ev.caution}
+            </div>
+            """, unsafe_allow_html=True)
+
     st.subheader("Quality Control")
     qc = a.quality_control
     st.markdown(f"""
@@ -712,7 +817,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General Guard v4.3")
+    st.title("🧠 Neuro-General Evidence Guard v4.6")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     strictness = st.selectbox("Safety strictness", ["Very strict", "Strict", "Balanced"], index=0)
     focus = st.selectbox("Neurology focus", [
@@ -753,36 +858,41 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General Guard v4.3")
-st.caption("يشمل أمراض الأعصاب + الطب العام: Safety Gate، module routing، فحص سريري شامل، differential متعدد الاختصاصات، أمان دوائي.")
+st.title("MedAssist Neuro-General Evidence Guard v4.6")
+st.caption("الجديد: Evidence Verification قبل النتائج + أسئلة قبل/بعد كل مرحلة + إمكانية إدخال مراجع/Guidelines للتدقيق.")
 
-top = st.columns(8)
+top = st.columns(10)
 top[0].metric("1", "Intake")
 top[1].metric("2", "Neuro")
 top[2].metric("3", "General")
-top[3].metric("4", "Questions")
-top[4].metric("5", "Exam")
-top[5].metric("6", "Dx")
-top[6].metric("7", "Results")
-top[7].metric("8", "Safety")
+top[3].metric("4", "Q Before")
+top[4].metric("5", "Exam Plan")
+top[5].metric("6", "Findings")
+top[6].metric("7", "Q After")
+top[7].metric("8", "Dx")
+top[8].metric("9", "Results")
+top[9].metric("10", "Evidence")
 
 tabs = st.tabs([
     "① Intake",
     "② Neuro Screen",
     "③ General Medicine Screen",
-    "④ Questions",
-    "⑤ Clinical Exam",
-    "⑥ Dx & Workup",
-    "⑦ Results / Imaging",
-    "⑧ Full Review / Medication",
-    "⑨ Report / Search"
+    "④ Evidence / Guidelines",
+    "⑤ Questions Before Exam",
+    "⑥ Exam Protocol: كيف أفحص؟",
+    "⑦ Enter Exam Findings",
+    "⑧ Questions After Exam",
+    "⑨ Dx & Workup",
+    "⑩ Results / Imaging",
+    "⑪ Full Review / Medication",
+    "⑫ Report / Search"
 ])
 
 uploaded_files = []
 
 with tabs[0]:
     st.header("① Intake")
-    clinical_search = st.text_input("🔎 Clinical search / سؤال سريري سريع", placeholder="مثال: ما التشخيصات المحتملة؟ هل الحالة عصبية أم قلبية؟ ما الفحص المطلوب؟")
+    clinical_search = st.text_input("🔎 Clinical search / سؤال سريري سريع", placeholder="مثال: ما الأسئلة قبل الفحص وبعد الفحص لهذه الحالة؟")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -812,7 +922,7 @@ with tabs[0]:
 with tabs[1]:
     st.header("② Neuro Screen")
     focal = st.text_area("Focal neuro: weakness/numbness/speech/vision/gait", height=80)
-    headache_icp_csf = st.text_area("Headache / raised ICP / CSF leak features", height=100, placeholder="thunderclap, papilledema, positional, Valsalva, clear rhinorrhea/otorrhea...")
+    headache_icp_csf = st.text_area("Headache / raised ICP / CSF leak features", height=100)
     seizure_syncope = st.text_area("Seizure/syncope features", height=90)
     vertigo = st.text_area("Dizziness/vertigo features", height=90)
     weakness_neuropathy = st.text_area("Numbness/weakness/back-neck/radicular symptoms", height=90)
@@ -820,26 +930,38 @@ with tabs[1]:
 
 with tabs[2]:
     st.header("③ General Medicine Screen")
-    cardiac = st.text_area("Cardiac symptoms/risk", height=80, placeholder="chest pain, palpitations, syncope, dyspnea, risk factors...")
+    cardiac = st.text_area("Cardiac symptoms/risk", height=80)
     resp = st.text_area("Respiratory symptoms/risk", height=80)
-    infection = st.text_area("Infection/systemic symptoms", height=80, placeholder="fever, chills, weight loss, rash, neck stiffness...")
-    endo = st.text_area("Endocrine/metabolic symptoms/risk", height=80, placeholder="diabetes, thyroid, hypoglycemia symptoms, electrolytes...")
+    infection = st.text_area("Infection/systemic symptoms", height=80)
+    endo = st.text_area("Endocrine/metabolic symptoms/risk", height=80)
     gi_renal = st.text_area("GI/renal/hepatic symptoms", height=80)
     rheum_msk_skin = st.text_area("Rheum/MSK/skin symptoms", height=80)
     psych_sleep_substance = st.text_area("Psychiatric/sleep/substance symptoms", height=80)
     risk_red = st.text_area("Trauma/cancer/immunosuppression/other risks", height=80)
 
-with tabs[4]:
-    st.header("⑤ Clinical Exam")
-    general_exam = st.text_area("General appearance/vitals exam", height=80)
-    neuro_exam = st.text_area("Neurologic exam", height=110, placeholder="mental status, cranial nerves, motor, reflexes, sensory, coordination, gait, fundoscopy...")
-    cardio_resp_exam = st.text_area("Cardiovascular/respiratory exam", height=90)
-    abd_renal_exam = st.text_area("Abdominal/renal exam", height=80)
-    ent_msk_skin_exam = st.text_area("ENT/MSK/skin/rheum exam", height=90)
-    psych_exam = st.text_area("Psychiatric/cognitive exam", height=80)
+with tabs[3]:
+    st.header("④ Evidence / Guidelines")
+    st.markdown("<div class='workflow-card'>ضع هنا مقتطفات من المراجع أو guideline notes. إذا لم تضع مرجعًا، التطبيق سيقول إن التوصية غير مفحوصة live ولا يدّعي أنه بحث في المراجع.</div>", unsafe_allow_html=True)
+    reference_notes = st.text_area(
+        "Reference notes / guideline excerpts",
+        height=180,
+        placeholder="مثال: NICE headache guideline excerpt, AAN seizure guidance, AHA syncope/stroke principle, local hospital protocol..."
+    )
+    st.info("يمكنك أيضًا رفع PDF أو صورة تقرير في صفحة Results / Imaging. عند وجود مراجع مرفوعة أو مكتوبة، سيحاول ربط التوصيات بها في Evidence Verification.")
 
 with tabs[6]:
-    st.header("⑦ Results / Imaging")
+    st.header("⑦ Enter Exam Findings")
+    st.markdown("<div class='workflow-card'>بعد أن يعطيك التطبيق طريقة الفحص في المرحلة ⑤، اكتب هنا ماذا وجدت أنت بالفحص.</div>", unsafe_allow_html=True)
+    general_exam = st.text_area("General appearance/vitals exam", height=80)
+    neuro_exam = st.text_area("Neurologic exam", height=130)
+    cardio_resp_exam = st.text_area("Cardiovascular/respiratory exam", height=100)
+    abd_renal_exam = st.text_area("Abdominal/renal exam", height=80)
+    ent_msk_skin_exam = st.text_area("ENT/MSK/skin/rheum exam", height=100)
+    psych_exam = st.text_area("Psychiatric/cognitive exam", height=80)
+    other_exam = st.text_area("Other exam findings", height=80)
+
+with tabs[9]:
+    st.header("⑩ Results / Imaging")
     labs = st.text_area("Labs", height=120)
     imaging = st.text_area("Imaging report text: MRI/CT/X-ray/Ultrasound", height=150)
     other = st.text_area("ECG/EEG/EMG/Echo/Other report", height=120)
@@ -849,7 +971,7 @@ with tabs[6]:
 
 def context_now():
     return make_context({
-        "clinical_search": clinical_search,
+        "clinical_search": clinical_search, "reference_notes": reference_notes,
         "patient_id": patient_id, "age": age, "sex": sex, "pregnancy": pregnancy,
         "setting": setting, "complaint": complaint, "onset": onset, "course": course,
         "quality": quality, "severity": severity, "associated": associated,
@@ -861,13 +983,13 @@ def context_now():
         "meds": meds, "allergies": allergies, "safety": safety, "vitals": vitals,
         "general_exam": general_exam, "neuro_exam": neuro_exam, "cardio_resp_exam": cardio_resp_exam,
         "abd_renal_exam": abd_renal_exam, "ent_msk_skin_exam": ent_msk_skin_exam,
-        "psych_exam": psych_exam,
+        "psych_exam": psych_exam, "other_exam": other_exam,
         "labs": labs, "imaging": imaging, "other": other, "doctor_question": doctor_question,
     })
 
 def analyze_button(label, stage):
     if st.button(label, type="primary", use_container_width=True):
-        with st.spinner("AI يحلل مع تغطية أعصاب + طب عام..."):
+        with st.spinner("AI يحلل..."):
             try:
                 ctx = context_now()
                 a = run_ai(stage, focus, body_system_focus, strictness, ctx, uploaded_files, model)
@@ -880,29 +1002,35 @@ def analyze_button(label, stage):
                 st.error("حدث خطأ أثناء التحليل")
                 st.exception(e)
 
-with tabs[3]:
-    st.header("④ Questions")
-    st.markdown("<div class='workflow-card'>يعطي أسئلة إلزامية حسب المسارات المفعّلة: أعصاب + طب عام + أمان دوائي.</div>", unsafe_allow_html=True)
-    analyze_button("Generate questions + module routing", "questions")
+with tabs[4]:
+    st.header("⑤ Questions Before Exam")
+    st.markdown("<div class='workflow-card'>أسئلة حسب الحالة قبل الفحص السريري، مع red flags وأمان دوائي.</div>", unsafe_allow_html=True)
+    analyze_button("Generate questions BEFORE exam", "questions")
     if "analysis_questions" in st.session_state:
         render(st.session_state["analysis_questions"])
 
-with tabs[4]:
-    st.divider()
-    analyze_button("Suggest and interpret clinical exam", "exam")
-    if "analysis_exam" in st.session_state:
-        render(st.session_state["analysis_exam"])
-
 with tabs[5]:
-    st.header("⑥ Dx & Workup")
-    st.markdown("<div class='workflow-card'>تحليل تفريقي متعدد الاختصاصات مع فحوصات وصور فقط عند الحاجة.</div>", unsafe_allow_html=True)
-    analyze_button("Analyze Dx & Workup", "preliminary")
+    st.header("⑥ Exam Protocol: كيف أفحص؟")
+    analyze_button("Generate detailed clinical exam protocol", "exam_protocol")
+    if "analysis_exam_protocol" in st.session_state:
+        render(st.session_state["analysis_exam_protocol"])
+
+with tabs[7]:
+    st.header("⑧ Questions After Exam")
+    st.markdown("<div class='workflow-card'>بعد إدخال نتائج الفحص، يعطيك أسئلة جديدة مبنية على الموجودات.</div>", unsafe_allow_html=True)
+    analyze_button("Interpret exam + generate questions AFTER exam", "exam_interpretation")
+    if "analysis_exam_interpretation" in st.session_state:
+        render(st.session_state["analysis_exam_interpretation"])
+
+with tabs[8]:
+    st.header("⑨ Dx & Workup")
+    analyze_button("Analyze Dx & Workup after exam", "preliminary")
     if "analysis_preliminary" in st.session_state:
         render(st.session_state["analysis_preliminary"])
 
-with tabs[7]:
-    st.header("⑧ Full Review / Medication")
-    analyze_button("Analyze results + medication safety", "results")
+with tabs[10]:
+    st.header("⑪ Full Review / Medication")
+    analyze_button("Analyze results + questions AFTER labs/imaging + medication safety", "results")
     if "analysis_results" in st.session_state:
         render(st.session_state["analysis_results"])
 
@@ -911,8 +1039,8 @@ with tabs[7]:
     if "analysis_full_review" in st.session_state:
         render(st.session_state["analysis_full_review"])
 
-with tabs[8]:
-    st.header("⑨ Report / Search")
+with tabs[11]:
+    st.header("⑫ Report / Search")
     search_history = st.text_input("🔎 Search saved reports", placeholder="headache, seizure, chest pain, MRI, patient id...")
     reports = sorted(DATA_DIR.glob("neuro_general_guard_*.md"), reverse=True)
 
