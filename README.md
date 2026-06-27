@@ -1,52 +1,34 @@
-# MedAssist Clinic AI Ultra v3
+# MedAssist Neuro Strict v4
 
-نسخة متعددة المراحل كما طلبت:
+نسخة مخصصة أكثر لعلم الأعصاب وأكثر صرامة.
 
-1. Intake:
-   - القصة
-   - الأعراض
-   - الإحساس
-   - الأدوية
-   - الحساسية
-   - vitals
-
-2. AI Questions:
-   - أسئلة للمريض
-   - red flags
-   - أمان دوائي أولي
-
-3. Clinical Exam:
-   - نصائح للفحص السريري
-   - خانة لإدخال ماذا وجد الطبيب
-
-4. Preliminary Dx & Workup:
-   - تحليل بعد الأسئلة والفحص
-   - differential diagnosis
-   - فحوصات وصور مطلوبة حسب الحالة
-
-5. Results:
-   - إدخال labs يدويًا
-   - إدخال MRI/X-ray/CT reports
-   - رفع PDF/images/Excel/CSV/Word
-
-6. Final Support:
-   - تحليل بعد النتائج
-   - updated differential
-   - هل يحتاج فحوصات/صور إضافية
-   - medication support مع موانع وتحذيرات وليس وصفة نهائية
-
-7. Report:
-   - Download report
-   - JSON/Markdown
+## الميزات
+- Neurology-first
+- أسئلة إلزامية للصداع وسائر الحالات العصبية
+- فحص عصبي مفصل
+- تفسير واضح للفحص السريري:
+  - ماذا يعني الموجود
+  - localization
+  - ماذا يدعم
+  - ماذا ينفي جزئيًا ولا يستبعده كليًا
+  - ما الفحص أو الاختبار التالي
+- قرار تصوير صارم:
+  - لا CT/MRI لصداع أولي بسيط مع فحص عصبي طبيعي وبدون red flags
+- Screens for:
+  - Headache / migraine / raised ICP
+  - Seizure / syncope
+  - Stroke / TIA
+  - Dizziness / vertigo
+  - Neuropathy
+  - CSF leak
+- Medication safety mandatory
+- Trusted reference anchors داخل التحليل
 
 ## Streamlit Secrets
-
-ضع المفتاح في Streamlit secrets:
 
 ```toml
 OPENAI_API_KEY = "sk-..."
 ```
 
-## Main file path
-
-`app.py`
+## Main file
+app.py
