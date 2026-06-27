@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.1.1
+# MedAssist Neuro-General AutoEvidence Guard v4.7.2.1
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.1.1",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.2.1",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -90,6 +90,11 @@ class EvidenceVerification(BaseModel):
         "clinical_reasoning_only", "not_verified_live", "needs_specialist_review"
     ]
     reference_name_or_note: str
+    source_title: str = ""
+    source_organization: str = ""
+    source_year_or_date: str = ""
+    source_url_or_citation: str = ""
+    exact_evidence_point: str = ""
     evidence_strength: Literal["strong", "moderate", "low", "uncertain"]
     verification_status: Literal[
         "verified_from_web_search", "verified_from_uploaded_material", "framework_based_not_live_checked",
@@ -306,11 +311,24 @@ C) General medicine mimics:
   arrhythmia/ACS, PE, medication adverse effect, intoxication/withdrawal, renal/hepatic disease.
 D) Headache:
 - Use SNNOOP10 red flags and migraine/tension phenotype when headache is relevant.
-E) Near-syncope/palpitations:
-- Always consider arrhythmia, orthostatic hypotension, vasovagal syncope, hypoglycemia, anemia,
-  thyroid disease, dehydration, PE/ACS when supported.
-- Always activate Cardiology when palpitations + near-syncope are present.
-- Do not rank TIA medium/high without focal neurologic symptoms.
+E) Near-syncope/palpitations HARD RULES:
+- If palpitations + near-syncope/presyncope are present: ALWAYS activate Cardiology as same_day.
+- Also activate General Medicine, Endocrinology/Metabolic, and Toxicology/Medication Safety when relevant.
+- Mandatory before-exam questions must include:
+  complete syncope, exertional syncope, chest pain, severe dyspnea, sudden onset/offset of palpitations,
+  family history of sudden cardiac death, known structural heart disease, stimulant/caffeine/decongestant use,
+  dehydration/vomiting/diarrhea, bleeding/anemia symptoms, glucose/diabetes symptoms.
+- Initial workup should usually include ECG, orthostatic BP/HR, capillary glucose, BMP/electrolytes, renal function,
+  CBC when anemia/bleeding/fatigue is possible, and medication/substance review.
+- TSH is conditional: recurrent/persistent palpitations, weight loss, tremor, heat intolerance, goiter, or unexplained tachycardia.
+- Holter/event monitor is conditional: recurrent episodes or high suspicion when initial ECG is non-diagnostic.
+- Troponin is conditional only with chest pain, ischemic symptoms, abnormal ECG, or high cardiac risk.
+- PE workup is conditional only with significant dyspnea, pleuritic chest pain, hypoxia, tachycardia with PE risks, or clinical suspicion.
+- Do NOT rank TIA as medium/high without focal neurologic symptoms such as unilateral weakness/numbness, aphasia/dysarthria,
+  vision loss/diplopia, ataxia, or other focal brainstem/cortical signs.
+- If no focal neurologic deficit and symptoms are posture-related with palpitations, TIA should be low or cannot_rank.
+- ER threshold must include: complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, hypotension/shock,
+  persistent tachyarrhythmia, focal neurologic deficit, new severe headache, seizure, or SpO2 drop.
 F) Imaging:
 - Avoid routine imaging when not indicated. Do not miss imaging when emergency red flags exist.
 G) Medication safety:
@@ -331,7 +349,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.1.1.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.2.1.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -365,9 +383,13 @@ Mandatory rules:
 8. If results are entered, generate questions_after_labs_imaging that depend on those results.
 9. If treatment/medication support is considered, generate questions_before_medication and medication safety questions.
 10. Imaging must be justified. Avoid over-testing and under-testing.
-11. Medication support must never include dosing.
-12. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
-13. Return exactly according to schema.
+11. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
+12. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
+13. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
+    source_url_or_citation when available, exact_evidence_point, and limitations/caution.
+14. Medication support must never include dosing.
+15. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
+16. Return exactly according to schema.
 
 {REFERENCE_FRAMEWORK}
 """
@@ -377,7 +399,7 @@ def stage_instruction(stage, focus, body_system_focus):
     if stage == "questions":
         return f"""
 STAGE 1 — Questions Before Exam.
-Generate questions_before_exam strongly, plus missing critical data, red flags, modules, medication safety.
+Generate questions_before_exam strongly, plus missing critical data, red flags, modules, medication safety. For palpitations + near-syncope, include all mandatory cardiac/syncope questions and activate Cardiology.
 Also include questions_before_labs_imaging if early workup is likely.
 Neurology focus: {focus}
 General medicine focus: {body_system_focus}
@@ -385,7 +407,7 @@ General medicine focus: {body_system_focus}
     if stage == "exam_protocol":
         return f"""
 STAGE 2 — Detailed Exam Protocol Before Findings.
-Generate detailed_exam_protocol and questions_before_exam.
+Generate detailed_exam_protocol and questions_before_exam. For palpitations + near-syncope, include orthostatic vitals, 12-lead ECG, focused cardiac exam, respiratory exam, and focused neuro exam.
 Tell clinician HOW to perform exam before results are entered.
 Neurology focus: {focus}
 General medicine focus: {body_system_focus}
@@ -394,14 +416,14 @@ General medicine focus: {body_system_focus}
         return f"""
 STAGE 3 — Interpret Entered Exam Findings.
 Interpret exam findings.
-Generate questions_after_exam and questions_before_labs_imaging based on the exam.
+Generate questions_after_exam and questions_before_labs_imaging based on the exam. If neuro exam is normal and symptoms are posture-related with palpitations, lower TIA ranking and prioritize cardiac/orthostatic/metabolic causes.
 Neurology focus: {focus}
 General medicine focus: {body_system_focus}
 """
     if stage == "preliminary":
         return f"""
 STAGE 4 — Dx and Workup Before Results.
-Use history and exam. Generate differential, workup, imaging decision.
+Use history and exam. Generate differential, workup, imaging decision. Enforce: Cardiology activation for palpitations + near-syncope; TIA low/cannot_rank without focal neurologic signs; no routine brain imaging without neuro red flags.
 Generate evidence_verification for major diagnostic/workup/imaging recommendations.
 Generate questions_before_labs_imaging and questions_before_medication if treatment might be considered.
 Neurology focus: {focus}
@@ -555,9 +577,16 @@ Patient/case context:
 
 Return:
 1. Key guideline/evidence points relevant to triage, red flags, clinical exam, workup, imaging, and medication safety.
-2. What is supported by evidence.
-3. What is uncertain or needs specialist/manual reference check.
-4. Sources/citations.
+2. For each major recommendation, include:
+   - source title
+   - organization/publisher
+   - year/date if visible
+   - source URL/citation if visible
+   - exact evidence point in your own words
+   - limitation or when it does not apply
+3. Specifically search evidence for syncope/presyncope with palpitations, ECG, orthostatic vitals, ambulatory ECG monitoring, and neuroimaging indications.
+4. What is uncertain or needs specialist/manual reference check.
+5. Sources/citations.
 """
 
 
@@ -631,7 +660,7 @@ def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.1.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.2.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -866,6 +895,11 @@ def render(a):
             <b>Recommendation/claim:</b> {ev.recommendation_or_claim}<br>
             <b>Source type:</b> {ev.evidence_source_type}<br>
             <b>Reference:</b> {ev.reference_name_or_note}<br>
+            <b>Source title:</b> {ev.source_title}<br>
+            <b>Organization:</b> {ev.source_organization}<br>
+            <b>Year/date:</b> {ev.source_year_or_date}<br>
+            <b>URL/citation:</b> {ev.source_url_or_citation}<br>
+            <b>Evidence point:</b> {ev.exact_evidence_point}<br>
             <b>Evidence strength:</b> {ev.evidence_strength}<br>
             <b>Verification status:</b> {ev.verification_status}<br>
             <b>Impact:</b> {ev.how_it_changes_recommendation}<br>
@@ -912,7 +946,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.1")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.2")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
@@ -956,8 +990,8 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.1.1")
-st.caption("الجديد: Automatic Evidence Web Search بدون filters غير مدعومة + Evidence Verification + أسئلة قبل/بعد كل مرحلة.")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.2.1")
+st.caption("الجديد: Patch v4.7.2 — Cardiology إجباري مع near-syncope + تخفيض TIA بدون علامات عصبية + Evidence أوضح.")
 
 top = st.columns(10)
 top[0].metric("1", "Intake")

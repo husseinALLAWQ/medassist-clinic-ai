@@ -1,28 +1,55 @@
-# MedAssist Neuro-General AutoEvidence Guard v4.7.1
+# MedAssist Neuro-General AutoEvidence Guard v4.7.2
 
-هذه نسخة إصلاحية من v4.7.
+هذه نسخة Patch بعد اختبار v4.7.1.
 
-## سبب الإصلاح
-في بعض موديلات OpenAI مثل `gpt-4.1-mini` يظهر خطأ:
-`Parameter 'filters' not supported with model...`
-
-لذلك أزلنا `filters` من أداة `web_search`.
-الآن اختيار "Authoritative medical domains only" يتم عبر تعليمات داخل نص البحث، وليس عبر API filters.
-
-## الجديد في v4.7.1
-- Automatic Evidence Web Search بدون filters غير مدعومة
-- Fallback تلقائي إذا فشل البحث:
-  1. نفس الموديل بدون `tool_choice=required`
-  2. fallback إلى `gpt-4o-mini`
-- Evidence Verification يوضح هل النتيجة:
-  - verified_from_web_search
-  - framework_based_not_live_checked
-  - not_live_verified
-  - needs_manual_reference_check
+## ما الذي تم إصلاحه؟
+1. Cardiology إجباري إذا يوجد palpitations + near-syncope/presyncope.
+2. TIA لا يجب أن تكون medium/high إذا لا توجد علامات عصبية بؤرية.
+3. تقوية أسئلة ما قبل الفحص في حالات الدوخة والخفقان:
+   - complete syncope
+   - exertional syncope
+   - chest pain
+   - severe dyspnea
+   - sudden onset/offset palpitations
+   - family history sudden cardiac death
+   - structural heart disease
+   - stimulant/caffeine/decongestant use
+   - dehydration/vomiting/diarrhea
+   - bleeding/anemia symptoms
+   - glucose/diabetes symptoms
+4. تقوية Workup:
+   - ECG
+   - orthostatic BP/HR
+   - capillary glucose
+   - BMP/electrolytes/renal function
+   - CBC when possible anemia/bleeding/fatigue
+   - TSH conditional
+   - Holter/event monitor conditional
+   - Troponin conditional
+   - PE workup conditional
+5. Evidence Verification أصبح يطلب:
+   - source title
+   - organization
+   - year/date
+   - URL/citation
+   - exact evidence point
+   - caution/limitation
+6. ER threshold أقوى:
+   - complete syncope
+   - exertional syncope
+   - chest pain
+   - severe dyspnea
+   - abnormal ECG
+   - hypotension/shock
+   - persistent tachyarrhythmia
+   - focal neurologic deficit
+   - severe new headache
+   - seizure
+   - SpO2 drop
 
 ## مهم
-- البحث في المصادر المفتوحة المتاحة على الويب.
-- لا يفتح UpToDate أو مصادر مدفوعة إلا إذا كان لديك وصول مرخص/API.
+- البحث في المصادر الطبية المفتوحة.
+- لا يفتح UpToDate أو مصادر مدفوعة إلا إذا توفر وصول مرخص/API.
 - القرار النهائي للطبيب.
 
 ## Streamlit Secrets
