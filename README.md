@@ -1,22 +1,34 @@
-# MedAssist Neuro Ultra v4.1
+# MedAssist Neuro-General Guard v4.3
 
-هذه النسخة تجمع:
-- شكل Ultra v3 الواضح متعدد المراحل
-- صرامة Neuro Strict v4
-- خانة Clinical search / سؤال سريري سريع
-- Search saved reports
-- تفسير فحص سريري واضح
-- Neurology-first workflow
-- Trusted reference anchors داخل التحليل
+هذه النسخة ليست مخصصة للميغران فقط.
+
+## الهدف
+تغطي:
+- كل أمراض الأعصاب الأساسية
+- الطب العام ومقلدات الأمراض العصبية
+- أمراض القلب والصدر والغدد والالتهاب والروماتيزم والكلى والهضم والدم والنفسية وENT وMSK
 
 ## المراحل
-1. Neuro Intake
-2. Strict Questions
-3. Clinical Exam
-4. Preliminary Dx & Workup
-5. Results / Imaging
-6. Full Review / Medication
-7. Report / Search
+1. Intake
+2. Neuro Screen
+3. General Medicine Screen
+4. Questions
+5. Clinical Exam
+6. Dx & Workup
+7. Results / Imaging
+8. Full Review / Medication
+9. Report / Search
+
+## الميزات
+- Safety Gate
+- Module Routing
+- Neurology + General Medicine Differential
+- General medicine mimics check
+- Comprehensive clinical exam
+- Strict imaging/workup decision
+- Medication safety
+- Treatment support without dosing
+- Quality control
 
 ## Streamlit Secrets
 
