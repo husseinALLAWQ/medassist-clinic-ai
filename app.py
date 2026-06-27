@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.3.1
+# MedAssist Neuro-General AutoEvidence Guard v4.7.4
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.3.1",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.4",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -181,6 +181,22 @@ class WorkupItem(BaseModel):
     avoid_if_not_indicated: str
 
 
+class DiagnosticOption(BaseModel):
+    test_or_image: str
+    category: Literal[
+        "bedside", "lab", "cardiac", "neurophysiology", "imaging_brain",
+        "imaging_spine", "imaging_vascular", "imaging_chest",
+        "imaging_abdomen_pelvis", "procedure", "specialist_referral", "other"
+    ]
+    timing: Literal["must_do_now", "same_day_if_available", "conditional_next_step", "specialist_level", "not_indicated_now"]
+    indication_in_this_case: str
+    trigger_to_order: str
+    why_not_now_if_not_indicated: str
+    what_result_would_change: str
+    protocol_or_notes: str
+    danger_if_missed: str
+
+
 class ImagingDecision(BaseModel):
     imaging_needed_now: Literal["yes", "no", "conditional", "unclear_need_more_data"]
     imaging_type: str
@@ -275,6 +291,7 @@ class GuardAnalysis(BaseModel):
     detailed_exam_protocol: List[ExamProtocolStep] = Field(default_factory=list)
     exam_interpretation: List[ExamInterpretationItem] = Field(default_factory=list)
     recommended_workup: List[WorkupItem] = Field(default_factory=list)
+    comprehensive_diagnostic_map: List[DiagnosticOption] = Field(default_factory=list)
     imaging_decision: List[ImagingDecision] = Field(default_factory=list)
     differential_diagnosis: List[DifferentialItem] = Field(default_factory=list)
     interpreted_results: List[ResultInterpretation] = Field(default_factory=list)
@@ -329,9 +346,17 @@ E) Near-syncope/palpitations HARD RULES:
 - If no focal neurologic deficit and symptoms are posture-related with palpitations, TIA should be low or cannot_rank.
 - ER threshold must include: complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, hypotension/shock,
   persistent tachyarrhythmia, focal neurologic deficit, new severe headache, seizure, or SpO2 drop.
-F) Imaging:
+F) Comprehensive Diagnostic Map:
+- Always provide a comprehensive_diagnostic_map in addition to recommended_workup.
+- The map must show all relevant tests/images as a roadmap: must_do_now, same_day_if_available, conditional_next_step, specialist_level, not_indicated_now.
+- This is NOT permission to over-test. It explains WHEN each test/image becomes appropriate.
+- For neurologic concerns consider when triggered: CT brain, MRI brain, CTA/MRA head-neck, MRV/CTV, MRI spine, EEG, LP, EMG/NCS.
+- For dizziness/presyncope/palpitations consider when triggered: ECG, orthostatic vitals, glucose, CBC, BMP/Mg/Ca, TSH, troponin, D-dimer/PE workup, Holter/event monitor, echocardiography, cardiology referral.
+- For headache/raised ICP/CSF leak consider when triggered: fundoscopic exam, MRI brain/orbits, MRV, CT head, CT/MR cisternography, beta-2 transferrin, ENT skull-base/neuro-ophthalmology.
+G) Imaging:
 - Avoid routine imaging when not indicated. Do not miss imaging when emergency red flags exist.
-G) Medication safety:
+- If imaging is not needed now, still list major imaging options in comprehensive_diagnostic_map as not_indicated_now or conditional_next_step with exact triggers.
+H) Medication safety:
 - Always consider allergy, pregnancy/postpartum, age, renal/liver disease, anticoagulants/antiplatelets,
   QT risk, sedatives/opioids/benzodiazepines, serotonin syndrome risk, NSAID bleeding/renal risk,
   antiepileptic adverse effects, medication overuse headache.
@@ -349,7 +374,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.3.1.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.4.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -383,13 +408,14 @@ Mandatory rules:
 8. If results are entered, generate questions_after_labs_imaging that depend on those results.
 9. If treatment/medication support is considered, generate questions_before_medication and medication safety questions.
 10. Imaging must be justified. Avoid over-testing and under-testing.
-11. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
-12. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
-13. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
+11. Always provide comprehensive_diagnostic_map: include tests/images needed now, conditional tests/images, specialist-level tests, and tests/images not indicated now with exact triggers.
+12. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
+13. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
+14. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
     source_url_or_citation when available, exact_evidence_point, and limitations/caution.
-14. Medication support must never include dosing.
-15. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
-16. Return exactly according to schema.
+15. Medication support must never include dosing.
+16. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
+17. Return exactly according to schema.
 
 {REFERENCE_FRAMEWORK}
 """
@@ -423,8 +449,8 @@ General medicine focus: {body_system_focus}
     if stage == "preliminary":
         return f"""
 STAGE 4 — Dx and Workup Before Results.
-Use history and exam. Generate differential, workup, imaging decision. Enforce: Cardiology activation for palpitations + near-syncope; TIA low/cannot_rank without focal neurologic signs; no routine brain imaging without neuro red flags.
-Generate evidence_verification for major diagnostic/workup/imaging recommendations.
+Use history and exam. Generate differential, workup, comprehensive_diagnostic_map, imaging decision. Enforce: Cardiology activation for palpitations + near-syncope; TIA low/cannot_rank without focal neurologic signs; no routine brain imaging without neuro red flags.
+Generate evidence_verification for major diagnostic/workup/imaging recommendations. Also generate comprehensive_diagnostic_map with must-do-now, conditional, specialist-level, and not-indicated-now tests/images.
 Generate questions_before_labs_imaging and questions_before_medication if treatment might be considered.
 Neurology focus: {focus}
 General medicine focus: {body_system_focus}
@@ -440,7 +466,7 @@ General medicine focus: {body_system_focus}
 """
     return f"""
 STAGE 6 — Full Review.
-Use all data and fill all staged question sections where relevant. Include evidence_verification for all major recommendations.
+Use all data and fill all staged question sections where relevant. Include evidence_verification for all major recommendations and comprehensive_diagnostic_map for tests/images with clear triggers.
 Neurology focus: {focus}
 General medicine focus: {body_system_focus}
 """
@@ -577,16 +603,17 @@ Patient/case context:
 
 Return:
 1. Key guideline/evidence points relevant to triage, red flags, clinical exam, workup, imaging, and medication safety.
-2. For each major recommendation, include:
-   - source title
+2. For each major recommendation, include a SPECIFIC source, not a generic organization homepage:
+   - exact source title
    - organization/publisher
    - year/date if visible
    - source URL/citation if visible
    - exact evidence point in your own words
    - limitation or when it does not apply
 3. Specifically search evidence for syncope/presyncope with palpitations, ECG, orthostatic vitals, ambulatory ECG monitoring, and neuroimaging indications.
-4. What is uncertain or needs specialist/manual reference check.
-5. Sources/citations.
+4. If only a generic webpage is found, mark it as needs_manual_reference_check rather than strong verified evidence.
+5. What is uncertain or needs specialist/manual reference check.
+6. Sources/citations.
 """
 
 
@@ -709,6 +736,38 @@ def _append_workup_if_missing(a, test_name, type_, priority, why, changes, avoid
             why_needed=why,
             what_result_changes=changes,
             avoid_if_not_indicated=avoid
+        ))
+
+
+def _append_diag_option_if_missing(a, test_or_image, category, timing, indication, trigger, why_not_now, changes, protocol, danger):
+    key = test_or_image.lower()
+    if not any(key in _lc(d.test_or_image) for d in a.comprehensive_diagnostic_map):
+        a.comprehensive_diagnostic_map.append(DiagnosticOption(
+            test_or_image=test_or_image,
+            category=category,
+            timing=timing,
+            indication_in_this_case=indication,
+            trigger_to_order=trigger,
+            why_not_now_if_not_indicated=why_not_now,
+            what_result_would_change=changes,
+            protocol_or_notes=protocol,
+            danger_if_missed=danger
+        ))
+
+
+def _append_exam_protocol_if_missing(a, exam_item, section, priority, setup, steps, record, normal, abnormal, stop):
+    key = exam_item.lower()
+    if not any(key in _lc(e.exam_item) for e in a.detailed_exam_protocol):
+        a.detailed_exam_protocol.append(ExamProtocolStep(
+            exam_section=section,
+            exam_item=exam_item,
+            patient_position_or_setup=setup,
+            how_to_perform_step_by_step=steps,
+            what_to_record_exactly=record,
+            normal_expected_finding=normal,
+            abnormal_findings_and_meaning=abnormal,
+            safety_precaution_or_stop_condition=stop,
+            priority=priority
         ))
 
 
@@ -840,6 +899,65 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
         _append_workup_if_missing(a, "Holter/event monitor if ECG is normal but episodes recur", "monitoring", "important",
                                   "Intermittent arrhythmias may be missed on a single ECG.", "Captured rhythm during symptoms can confirm arrhythmia.", "Not first-line replacement for immediate ECG in current symptoms.")
 
+        # Stronger clinical exam protocol: not just visually.
+        _append_exam_protocol_if_missing(
+            a, "Palpate radial pulse and auscultate heart rhythm", "cardiovascular", "must_do_now",
+            "Patient seated or supine; fall precautions because of presyncope.",
+            ["Palpate radial pulse for 30-60 seconds.", "Auscultate heart at standard valve areas.", "Assess rate, regularity, extra beats, murmurs, and perfusion."],
+            ["pulse rate", "regular vs irregular rhythm", "murmur present/absent", "perfusion signs"],
+            "Regular rhythm, no murmur, adequate perfusion.",
+            ["Irregular rhythm suggests arrhythmia.", "Murmur suggests possible structural disease.", "Poor perfusion suggests urgent escalation."],
+            "Stop and escalate if chest pain, severe dyspnea, hypotension, syncope, or unstable rhythm occurs."
+        )
+        _append_exam_protocol_if_missing(
+            a, "Orthostatic BP and HR measurement", "orthostatic_vitals", "must_do_now",
+            "Supine then standing with support; fall precautions.",
+            ["Measure BP/HR after resting supine.", "Stand patient with support.", "Measure BP/HR after standing and record symptoms.", "Repeat according to local protocol if needed."],
+            ["supine BP/HR", "standing BP/HR", "symptoms during standing", "time points used"],
+            "No significant BP drop and no excessive HR rise with standing.",
+            ["BP drop supports orthostatic hypotension.", "Excessive HR rise supports volume depletion/autonomic physiology.", "Symptoms with abnormal vitals support orthostatic cause."],
+            "Stop if severe presyncope, syncope, chest pain, severe dyspnea, or unsafe gait."
+        )
+        _append_exam_protocol_if_missing(
+            a, "Focused neurologic screen", "neurologic", "important",
+            "Patient seated; stand/gait only if safe.",
+            ["Check mental status and speech.", "Check pupils/EOM/visual fields if relevant.", "Check limb power, sensation, coordination.", "Assess gait only if safe."],
+            ["speech", "cranial nerve screen", "power", "sensation", "coordination", "gait"],
+            "Normal speech, cranial nerve screen, strength, coordination, and gait.",
+            ["Focal deficit changes priority toward stroke/TIA/brain imaging.", "Ataxia/diplopia/weakness/speech change are neuro red flags."],
+            "Do not perform gait testing if patient may faint; escalate if focal neurologic deficit appears."
+        )
+
+        # Comprehensive Diagnostic Map: broad roadmap, not automatic overtesting.
+        _append_diag_option_if_missing(a, "12-lead ECG", "cardiac", "must_do_now",
+            "Palpitations with near-syncope and tachycardia.", "Any palpitations with presyncope/syncope or tachycardia.", "It is indicated now.", "Detects arrhythmia, conduction disease, ischemic patterns, QT prolongation.", "Obtain during symptoms if possible.", "Missing arrhythmia can miss a dangerous cardiac cause.")
+        _append_diag_option_if_missing(a, "Orthostatic BP/HR", "bedside", "must_do_now",
+            "Symptoms worsen standing and improve sitting.", "Posture-related dizziness/presyncope.", "It is indicated now.", "Confirms orthostatic hypotension or abnormal HR response.", "Use fall precautions.", "Missing orthostatic hypotension may miss dehydration/autonomic cause.")
+        _append_diag_option_if_missing(a, "Capillary glucose", "bedside", "must_do_now",
+            "Hypoglycemia can mimic dizziness/palpitations.", "Dizziness, presyncope, fasting/diabetes risk, altered symptoms.", "It is rapid and low burden, so indicated now.", "Low glucose changes immediate management.", "Check during symptoms if possible.", "Missing hypoglycemia can cause preventable deterioration.")
+        _append_diag_option_if_missing(a, "BMP/electrolytes/renal function including Mg/Ca if available", "lab", "same_day_if_available",
+            "Electrolyte and renal abnormalities can provoke palpitations or presyncope.", "Unexplained tachycardia, dehydration risk, medication risk, arrhythmia concern.", "May be conditional if symptoms are fully explained and mild, but useful same day.", "Identifies electrolyte/renal causes and medication safety risks.", "Include K/Mg/Ca when arrhythmia concern.", "Missing electrolyte disturbance can miss reversible arrhythmia triggers.")
+        _append_diag_option_if_missing(a, "CBC", "lab", "conditional_next_step",
+            "Anemia/bleeding/infection can cause tachycardia and presyncope.", "Pallor, fatigue, bleeding, melena, heavy menses, infection signs, persistent tachycardia.", "If no anemia/bleeding/systemic clues, less urgent but still reasonable in many clinics.", "Detects anemia, infection clues, platelet issues.", "Pair with bleeding history and exam.", "Missing anemia/bleeding can miss serious systemic cause.")
+        _append_diag_option_if_missing(a, "TSH", "lab", "conditional_next_step",
+            "Thyroid disease can cause tachycardia/palpitations.", "Recurrent/persistent palpitations, tremor, weight loss, heat intolerance, goiter, unexplained tachycardia.", "Not first emergency test before ECG/glucose/vitals.", "Abnormal result redirects endocrine/cardiac follow-up.", "Outpatient unless severe thyrotoxic features.", "Missing hyperthyroidism can prolong arrhythmia risk.")
+        _append_diag_option_if_missing(a, "Troponin / ACS pathway", "lab", "conditional_next_step",
+            "ACS can present with cardiopulmonary symptoms.", "Chest pain, ischemic symptoms, abnormal ECG, diaphoresis, high cardiac risk.", "No chest pain/ischemic features currently, so not automatic.", "Positive troponin changes to ACS pathway.", "Use local chest pain protocol.", "Missing ACS is dangerous.")
+        _append_diag_option_if_missing(a, "D-dimer / PE workup", "lab", "conditional_next_step",
+            "PE can cause tachycardia, dyspnea, presyncope.", "Significant dyspnea, pleuritic chest pain, hypoxia, leg swelling, immobilization, cancer, VTE risk.", "Mild dyspnea with normal SpO2 and no PE risks does not automatically justify it.", "Positive workup may lead to CT pulmonary angiography/anticoagulation pathway.", "Use Wells/PERC/local protocol.", "Missing PE can be life-threatening.")
+        _append_diag_option_if_missing(a, "Holter/event monitor", "cardiac", "conditional_next_step",
+            "Intermittent arrhythmias may not appear on single ECG.", "Recurrent episodes or high suspicion after nondiagnostic ECG.", "Not a replacement for immediate ECG.", "Captures rhythm during symptoms.", "Choose duration based on frequency.", "Missing intermittent arrhythmia can miss syncope cause.")
+        _append_diag_option_if_missing(a, "Echocardiography", "cardiac", "conditional_next_step",
+            "Structural heart disease can cause exertional syncope/arrhythmia.", "Murmur, abnormal ECG, known heart disease, exertional/supine syncope, heart failure signs.", "Not automatic if exam and ECG are normal and no structural clues.", "Identifies structural/valvular/cardiomyopathy causes.", "Cardiology-directed if abnormal.", "Missing structural disease can miss high-risk syncope cause.")
+        _append_diag_option_if_missing(a, "CT brain", "imaging_brain", "not_indicated_now",
+            "No focal neuro deficit, seizure, trauma, severe headache, or anticoagulant head injury in current data.", "Order if acute focal deficit, head trauma, anticoagulated trauma, thunderclap headache, seizure, altered mental status, suspected bleed.", "No neuro red flags now; over-imaging can mislead and delay cardiac evaluation.", "Detects hemorrhage/mass/acute intracranial process when indicated.", "Use emergency protocol if red flags appear.", "Missing intracranial emergency is dangerous when red flags exist.")
+        _append_diag_option_if_missing(a, "MRI brain ± MRA/MRV if indicated", "imaging_brain", "not_indicated_now",
+            "No focal neurologic syndrome or central vertigo signs currently.", "Order if persistent focal neurologic signs, posterior circulation symptoms, ataxia, diplopia, stroke/TIA syndrome, papilledema/raised ICP signs.", "Not indicated now because presentation is cardiac/orthostatic pattern.", "Can detect ischemia, mass, demyelination, posterior fossa pathology, venous thrombosis when protocol appropriate.", "Protocol depends on suspected diagnosis.", "Missing posterior circulation stroke is dangerous when focal/central signs exist.")
+        _append_diag_option_if_missing(a, "CTA/MRA head-neck", "imaging_vascular", "not_indicated_now",
+            "No stroke/TIA syndrome currently.", "Order if focal neurologic deficits, suspected large vessel event, dissection signs, severe acute neurologic syndrome.", "Not indicated now without focal neurologic signs.", "Detects vascular occlusion/stenosis/dissection.", "Use stroke pathway if triggered.", "Missing vascular emergency is dangerous when stroke signs appear.")
+        _append_diag_option_if_missing(a, "EEG", "neurophysiology", "not_indicated_now",
+            "No seizure movements, tongue bite, incontinence, or postictal confusion.", "Order if seizure-like event, recurrent unexplained LOC with seizure features, postictal state.", "Not indicated now for pure presyncope/palpitations.", "Supports seizure diagnosis when clinically suspected.", "Neurology-directed.", "Missing seizure matters when seizure features exist.")
+
         # TIA guardrail.
         if no_focal and posture_related:
             for d in a.differential_diagnosis:
@@ -872,11 +990,15 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
             if "pmc3295536" in _lc(ev.source_url_or_citation) and ("tia" in _lc(ev.source_title) or "transient ischemic" in _lc(ev.source_title)):
                 ev.verification_status = "needs_manual_reference_check"
                 ev.caution = "Potential citation mismatch: verify that the URL actually matches the stated TIA source before relying on it."
+            if _has_any(ev.source_url_or_citation, ["heart.org/en/professional/clinical-resources", "clinical-resources"]) and _lc(ev.source_title).strip() in ["aha scientific statement on palpitations", "american heart association guidelines"]:
+                ev.verification_status = "needs_manual_reference_check"
+                ev.caution = "Generic organization page or nonspecific source title; verify the exact guideline/scientific statement before treating as strong evidence."
 
     # Final dedupe again.
     a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
     a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
     a.recommended_workup = _dedupe_by_key(a.recommended_workup, lambda w: (w.type, w.test_or_action.lower()))
+    a.comprehensive_diagnostic_map = _dedupe_by_key(a.comprehensive_diagnostic_map, lambda d: (d.category, d.test_or_image.lower()))
     a.follow_up_thresholds = _dedupe_by_key(a.follow_up_thresholds, lambda f: (f.timeframe, f.situation.lower()))
     return a
 
@@ -886,7 +1008,7 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.3.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.4 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -1023,6 +1145,22 @@ def render(a):
             {w.why_needed}<br>
             <b>What changes:</b> {w.what_result_changes}<br>
             <b>Avoid if not indicated:</b> {w.avoid_if_not_indicated}
+            </div>
+            """, unsafe_allow_html=True)
+
+    if getattr(a, "comprehensive_diagnostic_map", None):
+        st.subheader("Comprehensive Diagnostic Map — كل الفحوصات والصور الممكنة مع الشروط")
+        for dmo in a.comprehensive_diagnostic_map:
+            cls = "red-box" if dmo.timing == "must_do_now" else ("orange-box" if dmo.timing in ["same_day_if_available", "conditional_next_step"] else ("purple-box" if dmo.timing == "specialist_level" else "gray-box"))
+            st.markdown(f"""
+            <div class='{cls}'>
+            <b>{dmo.timing} / {dmo.category}: {dmo.test_or_image}</b><br>
+            <b>Indication in this case:</b> {dmo.indication_in_this_case}<br>
+            <b>Trigger to order:</b> {dmo.trigger_to_order}<br>
+            <b>Why not now if not indicated:</b> {dmo.why_not_now_if_not_indicated}<br>
+            <b>What result changes:</b> {dmo.what_result_would_change}<br>
+            <b>Protocol/notes:</b> {dmo.protocol_or_notes}<br>
+            <b>Danger if missed:</b> {dmo.danger_if_missed}
             </div>
             """, unsafe_allow_html=True)
 
@@ -1169,7 +1307,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.3")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.4")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
@@ -1213,8 +1351,8 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.3.1")
-st.caption("الجديد: v4.7.3 — Guardrails برمجية بعد جواب AI: Cardiology إجباري، إزالة التكرار، إصلاح TIA، وإصلاح عرض الأسئلة.")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.4")
+st.caption("الجديد: v4.7.4 — خريطة شاملة للفحوصات والصور + فحص سريري أقوى + Evidence أدق.")
 
 top = st.columns(10)
 top[0].metric("1", "Intake")
