@@ -1,44 +1,49 @@
-# MedAssist Neuro-General AutoEvidence Guard v4.7.6
+# MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1
 
-تحسين كبير بعد اختبار v4.7.5.
+نسخة GPT-5 القوية من Level-5 AutoEvidence.
 
-## أهم التحسينات
-1. تنظيف التكرار:
-   - يدمج Resting 12-lead ECG و 12-lead ECG.
-   - يدمج Orthostatic BP measurements و Orthostatic BP/HR.
-   - يدمج Ambulatory ECG Monitoring و Holter/event monitor.
-   - يدمج BMP/electrolytes/renal/Mg/Ca.
-   - يحذف الأسئلة المتشابهة بشكل أذكى.
+## الافتراضي
+- Clinical analysis model: `gpt-5.5`
+- Evidence search model: `gpt-5.4-mini`
 
-2. Differential أقوى:
-   - في palpitations + near-syncope يبقى Cardiac arrhythmia = high / same_day.
-   - Orthostatic/postural presyncope = high إذا الأعراض worse standing/improve sitting.
-   - Vasovagal/neurocardiogenic يبقى medium ولا يسبق arrhythmia.
+## Model Power Preset
+في الـ sidebar يوجد:
+- GPT-5.5 strongest
+- GPT-5.4 strong
+- GPT-5.4 mini balanced
+- Manual
 
-3. Action Pathway جديد:
-   - ماذا تفعل الآن.
-   - ماذا إذا ECG abnormal.
-   - ماذا إذا orthostatic positive.
-   - ماذا إذا ECG/labs normal لكن النوبات تتكرر.
-   - ماذا إذا ظهرت red flags neurologic/cardiac.
+إذا حسابك لا يملك وصولًا إلى النموذج المختار، التطبيق يحاول fallback تلقائيًا:
+1. selected model
+2. gpt-5.5
+3. gpt-5.4
+4. gpt-5.4-mini
+5. gpt-4o
+6. gpt-4o-mini
 
-4. Diagnostic Map مرتبة:
-   - must_do_now
-   - same_day_if_available
-   - conditional_next_step
-   - specialist_level
-   - not_indicated_now
+## ملاحظة مهمة
+قد تختلف أسماء/إتاحة الموديلات حسب حساب OpenAI API لديك. إذا ظهر خطأ model not found أو access denied، اختر Manual واكتب اسم الموديل المتاح لديك.
 
-5. Evidence guardrail:
-   - يحذر إذا المصدر عام جدًا وليس guideline section واضح.
-   - يطلب manual reference check إذا المصدر غير محدد بدقة.
+## وظيفة البرنامج
+- محرك طبي عام وليس خاصًا بحالة واحدة.
+- يبحث أوتوماتيكيًا في المصادر الطبية المفتوحة.
+- يعطي:
+  - Safety Gate
+  - Evidence Verification
+  - Clinical Reasoning Summary
+  - Questions
+  - Detailed Clinical Exam
+  - Differential Diagnosis
+  - Recommended Workup
+  - Comprehensive Diagnostic Map
+  - Imaging Decisions
+  - Action Pathway
+  - Medication Safety بدون جرعات
 
-6. يحافظ على:
-   - AutoEvidence Web Search.
-   - Cardiology forced in palpitations + near-syncope.
-   - TIA low/cannot_rank without focal signs.
-   - No routine neuroimaging unless neurologic red flags.
-   - Clinical exam protocol مفصل.
+## Streamlit Secrets
+```toml
+OPENAI_API_KEY = "sk-..."
+```
 
 ## Main file
 app.py

@@ -1,8 +1,9 @@
+
 import base64
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 import streamlit as st
 from openai import OpenAI
@@ -10,12 +11,15 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.6
-# Adds: staged questions before/after every clinical step
+# MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1
+# General case-independent clinical decision-support engine.
+# No hard-coded disease-specific patching.
+# Workflow:
+# Case -> web evidence search -> questions -> exam protocol -> diagnostic map -> results -> action pathway
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.6",
+    page_title="MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -23,7 +27,7 @@ st.set_page_config(
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.5"
 
 
 # =========================================================
@@ -47,141 +51,113 @@ st.markdown("""
 .orange-box {border-left:5px solid #fd9644;padding:11px 14px;border-radius:9px;background:rgba(253,150,68,.10);margin-bottom:8px;}
 .green-box {border-left:5px solid #00b894;padding:11px 14px;border-radius:9px;background:rgba(0,184,148,.10);margin-bottom:8px;}
 .gray-box {border-left:5px solid #95a5a6;padding:11px 14px;border-radius:9px;background:rgba(149,165,166,.10);margin-bottom:8px;}
-.question-box {border-left:5px solid #9b59b6;padding:11px 14px;border-radius:9px;background:rgba(155,89,182,.10);margin-bottom:8px;}
 </style>
 """, unsafe_allow_html=True)
 
 
 # =========================================================
-# Schemas
+# Pydantic schemas
 # =========================================================
 
 class SafetyGate(BaseModel):
+    triage_level: Literal["emergency", "same_day", "24_48h", "routine", "unclear"]
     emergency_now: Literal["yes", "no", "unclear"]
-    same_day_assessment_needed: Literal["yes", "no", "unclear"]
+    same_day_needed: Literal["yes", "no", "unclear"]
     reason: str
     immediate_action: str
     must_not_miss_conditions: List[str] = Field(default_factory=list)
+    red_flag_thresholds: List[str] = Field(default_factory=list)
 
 
-class ActivatedModule(BaseModel):
-    module: Literal[
-        "Neurology", "Emergency Medicine", "General Medicine", "Cardiology", "Pulmonology",
-        "Endocrinology/Metabolic", "Infectious Disease", "Rheumatology", "Nephrology/Urology",
-        "Gastroenterology/Hepatology", "Hematology", "ENT", "Psychiatry", "Orthopedics/MSK",
-        "Dermatology", "Pediatrics", "Gynecology/Pregnancy", "Toxicology/Medication Safety"
-    ]
-    why_activated: str
-    urgency: Literal["emergency", "same_day", "soon", "routine"]
+class ActivatedSpecialty(BaseModel):
+    specialty: str
+    urgency: Literal["emergency", "same_day", "24_48h", "routine", "watchful_waiting"]
+    why_relevant: str
+    what_this_specialty_must_rule_out: List[str] = Field(default_factory=list)
 
 
-class ReferenceAnchor(BaseModel):
-    source_or_framework: str
-    principle_used: str
-    how_it_applies_here: str
-
-
-
-class EvidenceVerification(BaseModel):
+class EvidenceItem(BaseModel):
     clinical_question: str
     recommendation_or_claim: str
-    evidence_source_type: Literal[
-        "automatic_web_search", "uploaded_guideline_or_reference", "built_in_guideline_framework",
-        "clinical_reasoning_only", "not_verified_live", "needs_specialist_review"
-    ]
-    reference_name_or_note: str
+    source_type: Literal["automatic_web_search", "uploaded_reference", "doctor_entered_reference", "clinical_reasoning_only", "not_verified"]
     source_title: str = ""
     source_organization: str = ""
     source_year_or_date: str = ""
-    source_url_or_citation: str = ""
-    exact_evidence_point: str = ""
+    url_or_citation: str = ""
+    evidence_point: str = ""
     evidence_strength: Literal["strong", "moderate", "low", "uncertain"]
-    verification_status: Literal[
-        "verified_from_web_search", "verified_from_uploaded_material", "framework_based_not_live_checked",
-        "not_live_verified", "insufficient_evidence", "needs_manual_reference_check"
-    ]
-    how_it_changes_recommendation: str
-    caution: str
+    verification_status: Literal["verified_from_web_search", "verified_from_uploaded_or_entered_reference", "framework_based_not_live_checked", "not_verified", "needs_manual_reference_check"]
+    applicability_to_this_case: str
+    limitation_or_caution: str
 
 
+class ReasoningSummary(BaseModel):
+    hypothesis_or_problem: str
+    why_considered: str
+    features_supporting: List[str] = Field(default_factory=list)
+    features_against: List[str] = Field(default_factory=list)
+    missing_data_that_would_change_it: List[str] = Field(default_factory=list)
+    next_best_step: str
 
-class MissingCriticalData(BaseModel):
+
+class MissingDataItem(BaseModel):
     item: str
-    why_required: str
+    why_it_matters: str
     blocks_safe_decision: bool
-
-
-class ChecklistItem(BaseModel):
-    checklist_name: str
-    item: str
-    status_from_case: Literal["present", "absent", "unknown", "not_applicable"]
-    action_if_present_or_unknown: str
+    how_to_get_it: str
 
 
 class StageQuestion(BaseModel):
     question: str
-    stage: Literal[
-        "before_exam", "after_exam", "before_labs_imaging", "after_labs_imaging",
-        "before_medication", "after_medication_safety", "general_followup"
-    ]
-    domain: Literal[
-        "neurology", "general_medicine", "cardiology", "pulmonology", "infection",
-        "endocrine_metabolic", "rheumatology", "renal_urology", "gastro_hepato",
-        "hematology", "ENT", "psychiatry", "orthopedics_MSK", "gynecology_pregnancy",
-        "medication_safety", "red_flags", "social_functional"
-    ]
+    stage: Literal["before_exam", "after_exam", "before_tests", "after_tests", "before_treatment", "followup"]
+    domain: str
+    priority: Literal["must_ask_now", "important", "routine"]
     why_ask: str
     how_answer_changes_decision: str
-    priority: Literal["must_ask_now", "important", "routine"]
-
-
-class RedFlag(BaseModel):
-    flag: str
-    domain: str
-    status_from_data: Literal["present", "absent", "unknown"]
-    why_dangerous: str
-    action_threshold: str
-    urgency: Literal["emergency", "same_day", "soon", "routine"]
 
 
 class ExamProtocolStep(BaseModel):
-    exam_section: Literal[
-        "general_vitals", "neurologic", "cardiovascular", "respiratory", "abdominal",
-        "ENT", "MSK", "skin", "rheumatologic", "psychiatric", "orthostatic_vitals",
-        "bedside_tests", "other"
-    ]
+    section: str
     exam_item: str
+    timing: Literal["must_do_now", "important", "routine", "conditional"]
     patient_position_or_setup: str
     how_to_perform_step_by_step: List[str] = Field(default_factory=list)
-    what_to_record_exactly: List[str] = Field(default_factory=list)
-    normal_expected_finding: str
-    abnormal_findings_and_meaning: List[str] = Field(default_factory=list)
-    safety_precaution_or_stop_condition: str
-    priority: Literal["must_do_now", "important", "routine"]
+    record_exactly: List[str] = Field(default_factory=list)
+    normal_expected: str
+    abnormal_meaning: List[str] = Field(default_factory=list)
+    stop_or_escalate_if: str
 
 
-class ExamInterpretationItem(BaseModel):
-    entered_finding: str
+class ExamInterpretation(BaseModel):
+    finding_entered: str
     interpretation: str
-    localization_or_system_if_relevant: str
     supports: List[str] = Field(default_factory=list)
     argues_against_but_does_not_exclude: List[str] = Field(default_factory=list)
-    next_exam_or_test_triggered: str
+    next_step_triggered: str
+
+
+class DifferentialDiagnosis(BaseModel):
+    diagnosis_or_category: str
+    domain: str
+    probability: Literal["high", "medium", "low", "cannot_rank"]
+    urgency: Literal["emergency", "same_day", "24_48h", "routine"]
+    why_possible: List[str] = Field(default_factory=list)
+    why_less_likely: List[str] = Field(default_factory=list)
+    key_missing_data: List[str] = Field(default_factory=list)
+    rule_in_rule_out_step: str
+    evidence_support: str
 
 
 class WorkupItem(BaseModel):
     test_or_action: str
-    type: Literal[
-        "lab", "imaging", "ECG", "EEG", "LP", "EMG_NCS", "bedside_test",
-        "procedure", "referral", "monitoring", "other"
-    ]
-    priority: Literal["urgent", "important", "routine", "not_now"]
+    category: Literal["bedside", "lab", "cardiac", "neurophysiology", "imaging", "procedure", "monitoring", "referral", "other"]
+    priority: Literal["urgent_now", "same_day", "conditional", "routine", "not_now"]
     why_needed: str
     what_result_changes: str
-    avoid_if_not_indicated: str
+    when_to_avoid_or_defer: str
 
 
-class DiagnosticOption(BaseModel):
+class DiagnosticMapItem(BaseModel):
     test_or_image: str
     category: Literal[
         "bedside", "lab", "cardiac", "neurophysiology", "imaging_brain",
@@ -194,37 +170,18 @@ class DiagnosticOption(BaseModel):
     why_not_now_if_not_indicated: str
     what_result_would_change: str
     protocol_or_notes: str
-    danger_if_missed: str
-
-
-class ActionPathwayItem(BaseModel):
-    step: str
-    when: Literal["now", "if_abnormal", "if_normal_but_recurrent", "if_red_flag", "followup"]
-    action: str
-    reason: str
-    escalation: str
+    danger_if_missed_when_indicated: str
 
 
 class ImagingDecision(BaseModel):
-    imaging_needed_now: Literal["yes", "no", "conditional", "unclear_need_more_data"]
     imaging_type: str
     body_region: str
+    needed_now: Literal["yes", "no", "conditional", "unclear"]
+    timing: Literal["emergency", "same_day", "24_48h", "routine", "not_indicated_now"]
     indication_or_reason: str
-    why_not_needed_if_no: str
-    urgency: Literal["emergency", "same_day", "soon", "routine", "not_indicated_now"]
+    trigger_if_not_now: str
     protocol_notes: str
-    explicit_no_imaging_statement: str
-
-
-class DifferentialItem(BaseModel):
-    diagnosis_or_category: str
-    specialty_domain: str
-    probability: Literal["high", "medium", "low", "cannot_rank"]
-    urgency: Literal["emergency", "same_day", "soon", "routine"]
-    supporting_features: List[str] = Field(default_factory=list)
-    features_against: List[str] = Field(default_factory=list)
-    missing_data_needed: List[str] = Field(default_factory=list)
-    confirm_or_exclude_step: str
+    overtesting_warning: str
 
 
 class ResultInterpretation(BaseModel):
@@ -232,40 +189,33 @@ class ResultInterpretation(BaseModel):
     finding: str
     interpretation: str
     effect_on_differential: str
+    next_step: str
     confidence: Literal["high", "medium", "low"]
 
 
-class MedicationSafety(BaseModel):
-    medication_or_issue: str
-    concern: str
-    check_before_treatment: List[str] = Field(default_factory=list)
-    avoid_or_caution: str
-    safer_consideration: str
-    severity: Literal["high", "moderate", "low"]
+class MedicationSafetyItem(BaseModel):
+    medication_or_class: str
+    issue: str
+    safety_checks_before_use: List[str] = Field(default_factory=list)
+    avoid_or_use_caution_if: List[str] = Field(default_factory=list)
+    monitoring_needed: str
+    non_dosing_note: str
 
 
-class TreatmentSupport(BaseModel):
-    clinical_goal: str
-    possible_class_or_option: str
-    when_to_consider: str
-    must_check_before: List[str] = Field(default_factory=list)
-    avoid_if: List[str] = Field(default_factory=list)
-    monitoring: str
-    note_no_dosing: str
-
-
-class FollowUpThreshold(BaseModel):
-    situation: str
+class ActionPathwayItem(BaseModel):
+    step: str
+    when: Literal["now", "if_abnormal", "if_normal_but_recurrent_or_persistent", "if_red_flag", "followup"]
     action: str
-    timeframe: Literal["immediate_ER", "same_day", "24_48h", "routine_followup", "self_monitor_with_return_precautions"]
+    reason: str
+    escalation_threshold: str
 
 
 class QualityControl(BaseModel):
-    completeness_level: Literal["safe_enough_for_next_step", "partial_needs_more_data", "unsafe_missing_critical_data"]
+    completeness: Literal["safe_enough_for_next_step", "partial_needs_more_data", "unsafe_missing_critical_data"]
     overtesting_check: str
     undertesting_check: str
+    evidence_check: str
     medication_safety_check: str
-    general_medicine_mimics_check: str
     clinician_override_needed_when: str
 
 
@@ -276,41 +226,31 @@ class SOAP(BaseModel):
     plan: str
 
 
-class GuardAnalysis(BaseModel):
+class Level5Analysis(BaseModel):
     stage: str
     case_summary: str
     problem_representation: str
     safety_gate: SafetyGate
-    triage_level: Literal["emergency", "same_day", "soon", "routine", "unclear"]
-    triage_reason: str
-    activated_modules: List[ActivatedModule] = Field(default_factory=list)
-    missing_critical_data: List[MissingCriticalData] = Field(default_factory=list)
-    guideline_checklist: List[ChecklistItem] = Field(default_factory=list)
-
+    activated_specialties: List[ActivatedSpecialty] = Field(default_factory=list)
+    evidence_verification: List[EvidenceItem] = Field(default_factory=list)
+    clinical_reasoning_summary: List[ReasoningSummary] = Field(default_factory=list)
+    missing_data: List[MissingDataItem] = Field(default_factory=list)
     questions_before_exam: List[StageQuestion] = Field(default_factory=list)
     questions_after_exam: List[StageQuestion] = Field(default_factory=list)
-    questions_before_labs_imaging: List[StageQuestion] = Field(default_factory=list)
-    questions_after_labs_imaging: List[StageQuestion] = Field(default_factory=list)
-    questions_before_medication: List[StageQuestion] = Field(default_factory=list)
-    questions_after_medication_safety: List[StageQuestion] = Field(default_factory=list)
+    questions_before_tests: List[StageQuestion] = Field(default_factory=list)
+    questions_after_tests: List[StageQuestion] = Field(default_factory=list)
+    questions_before_treatment: List[StageQuestion] = Field(default_factory=list)
     followup_questions: List[StageQuestion] = Field(default_factory=list)
-
-    red_flags: List[RedFlag] = Field(default_factory=list)
-    detailed_exam_protocol: List[ExamProtocolStep] = Field(default_factory=list)
-    exam_interpretation: List[ExamInterpretationItem] = Field(default_factory=list)
+    exam_protocol: List[ExamProtocolStep] = Field(default_factory=list)
+    exam_interpretation: List[ExamInterpretation] = Field(default_factory=list)
+    differential_diagnosis: List[DifferentialDiagnosis] = Field(default_factory=list)
     recommended_workup: List[WorkupItem] = Field(default_factory=list)
-    comprehensive_diagnostic_map: List[DiagnosticOption] = Field(default_factory=list)
+    comprehensive_diagnostic_map: List[DiagnosticMapItem] = Field(default_factory=list)
+    imaging_decisions: List[ImagingDecision] = Field(default_factory=list)
+    result_interpretation: List[ResultInterpretation] = Field(default_factory=list)
+    medication_safety: List[MedicationSafetyItem] = Field(default_factory=list)
     action_pathway: List[ActionPathwayItem] = Field(default_factory=list)
-    imaging_decision: List[ImagingDecision] = Field(default_factory=list)
-    differential_diagnosis: List[DifferentialItem] = Field(default_factory=list)
-    interpreted_results: List[ResultInterpretation] = Field(default_factory=list)
-    medication_safety: List[MedicationSafety] = Field(default_factory=list)
-    treatment_support_after_results: List[TreatmentSupport] = Field(default_factory=list)
-    follow_up_thresholds: List[FollowUpThreshold] = Field(default_factory=list)
-    trusted_reference_anchors: List[ReferenceAnchor] = Field(default_factory=list)
-    evidence_verification: List[EvidenceVerification] = Field(default_factory=list)
     quality_control: QualityControl
-    strict_quality_check: str
     what_to_do_now: str
     what_to_enter_next: str
     referral_or_er_threshold: str
@@ -320,58 +260,40 @@ class GuardAnalysis(BaseModel):
 
 
 # =========================================================
-# Prompts
+# General prompts
 # =========================================================
 
-REFERENCE_FRAMEWORK = """
-Clinical decision-support framework:
-A) Universal Safety Gate:
-- unstable vitals, altered mental status, severe respiratory distress, ACS-like chest pain,
-  stroke/TIA signs, sepsis/meningitis signs, anaphylaxis, severe dehydration/shock,
-  severe trauma, overdose/toxicity, pregnancy emergency, suicidal/homicidal risk -> escalate.
-B) Neurology:
-- headache/raised ICP/CSF leak, seizure/syncope, stroke/TIA, dizziness/vertigo, neuropathy,
-  myelopathy/radiculopathy, movement disorders, cognitive/psychiatric overlap.
-C) General medicine mimics:
-- hypoglycemia/electrolytes, thyroid, anemia, infection, autoimmune/inflammatory,
-  arrhythmia/ACS, PE, medication adverse effect, intoxication/withdrawal, renal/hepatic disease.
-D) Headache:
-- Use SNNOOP10 red flags and migraine/tension phenotype when headache is relevant.
-E) Near-syncope/palpitations HARD RULES:
-- If palpitations + near-syncope/presyncope are present: ALWAYS activate Cardiology as same_day.
-- Also activate General Medicine, Endocrinology/Metabolic, and Toxicology/Medication Safety when relevant.
-- Mandatory before-exam questions must include:
-  complete syncope, exertional syncope, chest pain, severe dyspnea, sudden onset/offset of palpitations,
-  family history of sudden cardiac death, known structural heart disease, stimulant/caffeine/decongestant use,
-  dehydration/vomiting/diarrhea, bleeding/anemia symptoms, glucose/diabetes symptoms.
-- Initial workup should usually include ECG, orthostatic BP/HR, capillary glucose, BMP/electrolytes, renal function,
-  CBC when anemia/bleeding/fatigue is possible, and medication/substance review.
-- TSH is conditional: recurrent/persistent palpitations, weight loss, tremor, heat intolerance, goiter, or unexplained tachycardia.
-- Holter/event monitor is conditional: recurrent episodes or high suspicion when initial ECG is non-diagnostic.
-- Troponin is conditional only with chest pain, ischemic symptoms, abnormal ECG, or high cardiac risk.
-- PE workup is conditional only with significant dyspnea, pleuritic chest pain, hypoxia, tachycardia with PE risks, or clinical suspicion.
-- Do NOT rank TIA as medium/high without focal neurologic symptoms such as unilateral weakness/numbness, aphasia/dysarthria,
-  vision loss/diplopia, ataxia, or other focal brainstem/cortical signs.
-- If no focal neurologic deficit and symptoms are posture-related with palpitations, TIA should be low or cannot_rank.
-- ER threshold must include: complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, hypotension/shock,
-  persistent tachyarrhythmia, focal neurologic deficit, new severe headache, seizure, or SpO2 drop.
-F) Comprehensive Diagnostic Map:
-- Always provide a comprehensive_diagnostic_map in addition to recommended_workup.
-- Always provide action_pathway: what to do now, what if abnormal, what if normal but recurrent, what if red flag.
-- The map must show all relevant tests/images as a roadmap: must_do_now, same_day_if_available, conditional_next_step, specialist_level, not_indicated_now.
-- This is NOT permission to over-test. It explains WHEN each test/image becomes appropriate.
-- For neurologic concerns consider when triggered: CT brain, MRI brain, CTA/MRA head-neck, MRV/CTV, MRI spine, EEG, LP, EMG/NCS.
-- For dizziness/presyncope/palpitations consider when triggered: ECG, orthostatic vitals, glucose, CBC, BMP/Mg/Ca, TSH, troponin, D-dimer/PE workup, Holter/event monitor, echocardiography, cardiology referral.
-- For headache/raised ICP/CSF leak consider when triggered: fundoscopic exam, MRI brain/orbits, MRV, CT head, CT/MR cisternography, beta-2 transferrin, ENT skull-base/neuro-ophthalmology.
-G) Imaging:
-- Avoid routine imaging when not indicated. Do not miss imaging when emergency red flags exist.
-- If imaging is not needed now, still list major imaging options in comprehensive_diagnostic_map as not_indicated_now or conditional_next_step with exact triggers.
-H) Medication safety:
-- Always consider allergy, pregnancy/postpartum, age, renal/liver disease, anticoagulants/antiplatelets,
-  QT risk, sedatives/opioids/benzodiazepines, serotonin syndrome risk, NSAID bleeding/renal risk,
-  antiepileptic adverse effects, medication overuse headache.
-H) Treatment support:
-- Provide classes/options and safety checks only. No doses. No final prescription.
+GENERAL_METHOD = """
+You are MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1.
+
+Role:
+- General clinical decision-support engine for clinicians.
+- Do NOT specialize in only one case or one disease.
+- Do NOT rely on hard-coded disease-specific patches.
+- For every case, dynamically:
+  1. Build a problem representation.
+  2. Identify safety gate and must-not-miss diagnoses.
+  3. Generate broad differential across relevant specialties.
+  4. Use automatic evidence research text when available.
+  5. Ask missing questions.
+  6. Give a detailed clinical exam protocol.
+  7. Give recommended workup.
+  8. Give a comprehensive diagnostic map, including tests/images not indicated now and exact triggers.
+  9. Interpret results if entered.
+  10. Provide action pathway.
+  11. Provide medication safety without dosing.
+
+Important:
+- Show a clinical reasoning summary, but do not expose hidden chain-of-thought.
+- Use concise clinical reasoning: supports / against / missing data / next step.
+- Never claim a source was checked unless evidence text or uploaded reference supports it.
+- If evidence is absent or vague, mark it as not_verified or needs_manual_reference_check.
+- Do not give final diagnosis. Give differential and next safe steps.
+- Do not give medication doses.
+- Be strict about emergency red flags.
+- Avoid both overtesting and undertesting.
+- Always include a full diagnostic map. This map is not an order set; it is a roadmap with triggers.
+- Use Arabic-friendly medical language with English medical terms when useful.
 """
 
 
@@ -381,104 +303,56 @@ def get_api_key():
     except Exception:
         return None
 
+def model_fallbacks(preferred_model: str):
+    """Return model fallback chain without duplicates."""
+    chain = [
+        preferred_model,
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ]
+    out = []
+    for m in chain:
+        if m and m not in out:
+            out.append(m)
+    return out
 
-def system_prompt(strictness: str):
+
+def selected_model_from_preset(preset: str, manual_model: str):
+    if preset == "GPT-5.5 strongest":
+        return "gpt-5.5"
+    if preset == "GPT-5.4 strong":
+        return "gpt-5.4"
+    if preset == "GPT-5.4 mini balanced":
+        return "gpt-5.4-mini"
+    if preset == "Manual":
+        return manual_model
+    return manual_model
+
+
+
+def stage_instruction(stage: str, depth: str, source_mode: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.6.
+STAGE: {stage}
+Reasoning depth: {depth}
+Evidence source mode: {source_mode}
 
-Identity:
-- Neurology-first but not neurology-only.
-- You cover neurological diseases and general medicine mimics/causes.
-- You are clinical decision support for a clinician, not a final diagnosis authority.
+Instructions for this stage:
+- If depth is Level 5, be comprehensive and systematic.
+- Do not rely on any single prebuilt disease workflow.
+- Search/evidence text may include several sources; use it, but verify applicability.
+- If the case is incomplete, say what is missing instead of over-ranking.
+- Always return according to the schema.
 
-Strictness level: {strictness}
-
-Mandatory rules:
-1. Start with Safety Gate in every stage.
-2. Activate relevant specialty modules.
-3. Before giving final recommendations in any stage, perform Evidence Verification:
-   - If AUTOMATIC WEB EVIDENCE RESEARCH is present in the context, use it and mark evidence_source_type as automatic_web_search and verification_status as verified_from_web_search when it directly supports the recommendation.
-   - Prefer recent guidelines/systematic reviews/official medical society sources when available.
-   - Preserve source names/citations in reference_name_or_note.
-   - If no uploaded reference is provided, do NOT pretend you searched live references.
-   - Use built-in clinical framework only as framework_based_not_live_checked.
-   - For uncertain/high-risk recommendations, mark needs_manual_reference_check or needs_specialist_review.
-   - Clearly separate guideline-based statements from clinical reasoning.
-4. Always produce staged questions when relevant:
-   - questions_before_exam
-   - questions_after_exam
-   - questions_before_labs_imaging
-   - questions_after_labs_imaging
-   - questions_before_medication
-   - questions_after_medication_safety
-   - followup_questions
-5. These questions must be specific to the current case and the current stage.
-6. If the stage is "exam_protocol", tell the doctor HOW to perform detailed clinical exam step by step before exam results.
-7. If exam findings are entered, interpret them clearly.
-8. If results are entered, generate questions_after_labs_imaging that depend on those results.
-9. If treatment/medication support is considered, generate questions_before_medication and medication safety questions.
-10. Imaging must be justified. Avoid over-testing and under-testing.
-11. Always provide comprehensive_diagnostic_map: include tests/images needed now, conditional tests/images, specialist-level tests, and tests/images not indicated now with exact triggers.
-13. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
-14. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
-15. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
-    source_url_or_citation when available, exact_evidence_point, and limitations/caution.
-16. Medication support must never include dosing.
-17. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
-18. Return exactly according to schema.
-
-{REFERENCE_FRAMEWORK}
-"""
-
-
-def stage_instruction(stage, focus, body_system_focus):
-    if stage == "questions":
-        return f"""
-STAGE 1 — Questions Before Exam.
-Generate questions_before_exam strongly, plus missing critical data, red flags, modules, medication safety. For palpitations + near-syncope, include all mandatory cardiac/syncope questions and activate Cardiology.
-Also include questions_before_labs_imaging if early workup is likely.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
-"""
-    if stage == "exam_protocol":
-        return f"""
-STAGE 2 — Detailed Exam Protocol Before Findings.
-Generate detailed_exam_protocol and questions_before_exam. For palpitations + near-syncope, include orthostatic vitals, 12-lead ECG, focused cardiac exam, respiratory exam, and focused neuro exam.
-Tell clinician HOW to perform exam before results are entered.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
-"""
-    if stage == "exam_interpretation":
-        return f"""
-STAGE 3 — Interpret Entered Exam Findings.
-Interpret exam findings.
-Generate questions_after_exam and questions_before_labs_imaging based on the exam. If neuro exam is normal and symptoms are posture-related with palpitations, lower TIA ranking and prioritize cardiac/orthostatic/metabolic causes.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
-"""
-    if stage == "preliminary":
-        return f"""
-STAGE 4 — Dx and Workup Before Results.
-Use history and exam. Generate differential, workup, comprehensive_diagnostic_map, imaging decision. Enforce: Cardiology activation for palpitations + near-syncope; TIA low/cannot_rank without focal neurologic signs; no routine brain imaging without neuro red flags.
-Generate evidence_verification for major diagnostic/workup/imaging recommendations. Also generate comprehensive_diagnostic_map with must-do-now, conditional, specialist-level, and not-indicated-now tests/images.
-Generate questions_before_labs_imaging and questions_before_medication if treatment might be considered.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
-"""
-    if stage == "results":
-        return f"""
-STAGE 5 — Results Review.
-Interpret labs/imaging/reports.
-Generate evidence_verification for major result interpretations and treatment safety recommendations.
-Generate questions_after_labs_imaging, questions_before_medication, questions_after_medication_safety.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
-"""
-    return f"""
-STAGE 6 — Full Review.
-Use all data and fill all staged question sections where relevant. Include evidence_verification for all major recommendations and comprehensive_diagnostic_map for tests/images with clear triggers.
-Neurology focus: {focus}
-General medicine focus: {body_system_focus}
+Stage-specific:
+- questions: emphasize missing history and red flags before exam/tests.
+- exam_protocol: tell clinician how to perform clinical exam step-by-step.
+- exam_interpretation: interpret entered exam findings and update hypotheses.
+- dx_workup: produce differential, workup, diagnostic map, imaging decisions, action pathway.
+- results: interpret labs/imaging/reports and update differential/action.
+- full_review: complete report.
 """
 
 
@@ -491,70 +365,84 @@ Sex: {data.get("sex")}
 Pregnancy/Postpartum: {data.get("pregnancy")}
 Setting: {data.get("setting")}
 
-CLINICAL SEARCH / DOCTOR FOCUS
-Clinical search question: {data.get("clinical_search")}
+CLINICAL QUESTION / DOCTOR GOAL
+{data.get("clinical_question")}
 
-REFERENCE / EVIDENCE MATERIAL ENTERED BY DOCTOR
-Reference notes / guideline excerpts: {data.get("reference_notes")}
-
-AUTOMATIC WEB EVIDENCE RESEARCH
-{data.get("automatic_evidence_research")}
-
-Evidence instruction:
-- If automatic web evidence is present and relevant, cite it in evidence_verification.
-- If uploaded/reference material is present, use it.
-- If no evidence text is present, do not claim live search; mark recommendations as framework_based_not_live_checked or not_live_verified.
-
-CHIEF COMPLAINT AND HISTORY
+MAIN HISTORY
 Chief complaint: {data.get("complaint")}
 Onset/timing: {data.get("onset")}
 Course/progression: {data.get("course")}
 Quality/sensation: {data.get("quality")}
 Severity/function impact: {data.get("severity")}
 Associated symptoms / ROS: {data.get("associated")}
-
-NEURO SCREEN
-Focal neuro symptoms: {data.get("focal")}
-Headache/raised ICP/CSF leak features: {data.get("headache_icp_csf")}
-Seizure/syncope features: {data.get("seizure_syncope")}
-Dizziness/vertigo features: {data.get("vertigo")}
-Numbness/weakness/back-neck symptoms: {data.get("weakness_neuropathy")}
-Previous neuro episodes/history: {data.get("previous_neuro")}
-
-GENERAL MEDICINE SCREEN
-Cardiac symptoms/risk: {data.get("cardiac")}
-Respiratory symptoms/risk: {data.get("resp")}
-Infection/systemic symptoms: {data.get("infection")}
-Endocrine/metabolic symptoms/risk: {data.get("endo")}
-GI/renal/hepatic symptoms: {data.get("gi_renal")}
-Rheum/MSK/skin symptoms: {data.get("rheum_msk_skin")}
-Psychiatric/sleep/substance symptoms: {data.get("psych_sleep_substance")}
-Trauma/cancer/immunosuppression: {data.get("risk_red")}
-
-MEDICATION SAFETY
+Past medical history: {data.get("pmh")}
+Family/social/substance history: {data.get("social")}
 Current medications: {data.get("meds")}
 Allergies: {data.get("allergies")}
-Renal/liver/pregnancy/bleeding risks: {data.get("safety")}
+Medication safety risks: {data.get("safety")}
+Vitals: {data.get("vitals")}
 
-VITALS
-{data.get("vitals")}
+SYSTEM SCREENS
+Neurology screen: {data.get("neuro_screen")}
+Cardiac/vascular screen: {data.get("cardiac_screen")}
+Respiratory screen: {data.get("resp_screen")}
+Infection/systemic screen: {data.get("infection_screen")}
+Endocrine/metabolic screen: {data.get("endo_screen")}
+GI/renal/hepatic screen: {data.get("gi_renal_screen")}
+Rheum/MSK/skin screen: {data.get("rheum_msk_skin_screen")}
+Psychiatric/sleep screen: {data.get("psych_sleep_screen")}
+Trauma/toxicology/other risks: {data.get("risk_screen")}
 
-EXAM FINDINGS ENTERED BY DOCTOR
-General appearance/vitals: {data.get("general_exam")}
+EXAM FINDINGS ENTERED BY CLINICIAN
+General/vitals exam: {data.get("general_exam")}
 Neurologic exam: {data.get("neuro_exam")}
-Cardiovascular/respiratory exam: {data.get("cardio_resp_exam")}
-Abdominal/renal exam: {data.get("abd_renal_exam")}
+Cardiovascular exam: {data.get("cardio_exam")}
+Respiratory exam: {data.get("resp_exam")}
+Abdominal/renal exam: {data.get("abd_exam")}
 ENT/MSK/skin/rheum exam: {data.get("ent_msk_skin_exam")}
-Psychiatric/cognitive exam: {data.get("psych_exam")}
-Other exam findings: {data.get("other_exam")}
+Psych/cognitive exam: {data.get("psych_exam")}
+Other exam: {data.get("other_exam")}
 
-RESULTS
+RESULTS ENTERED
 Labs: {data.get("labs")}
-Imaging report text: {data.get("imaging")}
-ECG/EEG/EMG/Echo/Other report: {data.get("other")}
+Imaging reports: {data.get("imaging")}
+ECG/EEG/EMG/Echo/Other: {data.get("other_results")}
 
-ADDITIONAL DOCTOR QUESTION
-{data.get("doctor_question")}
+DOCTOR ENTERED REFERENCES / GUIDELINES
+{data.get("reference_notes")}
+
+AUTOMATIC WEB EVIDENCE RESEARCH
+{data.get("evidence_text")}
+"""
+
+
+def build_evidence_query(stage, context, depth):
+    return f"""
+You are doing automatic medical evidence research for a clinical decision-support app.
+
+Goal:
+Research the case dynamically, not from a preselected disease workflow.
+
+Depth: {depth}
+Stage: {stage}
+
+Search strategy:
+1. Identify the main clinical problem and 5-10 plausible or dangerous hypotheses.
+2. Search authoritative open medical sources for:
+   - red flags and triage
+   - initial clinical exam
+   - initial workup
+   - imaging indications / when not to image
+   - specialist referral thresholds
+   - medication safety
+3. Prefer official guidelines, medical societies, government/public health sources, peer-reviewed reviews, systematic reviews, and reputable clinical references.
+4. Do not use random blogs/forums.
+5. Do not claim access to paid sources like UpToDate unless an accessible source is actually returned.
+6. Return source title, organization, year/date if visible, URL/citation if visible, and the evidence point in your own words.
+7. Note uncertainty and when manual specialist/guideline review is needed.
+
+Case context:
+{context}
 """
 
 
@@ -564,661 +452,192 @@ def file_item(uploaded_file):
     name = uploaded_file.name
     mime = uploaded_file.type or "application/octet-stream"
     ext = name.lower().split(".")[-1] if "." in name else ""
+
     if ext in ["png", "jpg", "jpeg", "webp"]:
         ext2 = "jpeg" if ext == "jpg" else ext
         return {"type": "input_image", "image_url": f"data:image/{ext2};base64,{b64}"}
     if ext in ["txt", "csv"]:
-        try:
-            text = raw.decode("utf-8", errors="ignore")[:20000]
-            return {"type": "input_text", "text": f"Uploaded file {name}:\n{text}"}
-        except Exception:
-            pass
+        text = raw.decode("utf-8", errors="ignore")[:30000]
+        return {"type": "input_text", "text": f"Uploaded text file {name}:\n{text}"}
     return {"type": "input_file", "filename": name, "file_data": f"data:{mime};base64,{b64}"}
 
 
-
-AUTHORITATIVE_MEDICAL_DOMAINS = [
-    "nice.org.uk", "nhs.uk", "who.int", "cdc.gov", "nih.gov", "ncbi.nlm.nih.gov",
-    "aan.com", "heart.org", "stroke.org", "acc.org", "escardio.org",
-    "idsociety.org", "thoracic.org", "chestnet.org", "ersnet.org",
-    "diabetes.org", "endocrine.org", "thyroid.org",
-    "kdigo.org", "acr.org", "rheumatology.org", "eular.org",
-    "gastrojournal.org", "acg.gi.org", "aasld.org",
-    "ashpublications.org", "hematology.org",
-    "aafp.org", "bmj.com", "msdmanuals.com",
-    "rcem.ac.uk", "acep.org", "saem.org",
-    "acog.org", "rcog.org.uk",
-    "epilepsy.com", "ilae.org"
-]
-
-
-def build_evidence_query(stage, focus, body_system_focus, context):
-    return f"""
-You are performing automatic evidence search for a clinician-facing clinical decision support app.
-
-Task:
-Search authoritative medical sources for the current clinical problem before recommendations are generated.
-Prioritize guidelines, consensus statements, systematic reviews, and official society/government medical sources.
-Do NOT use forums, random blogs, or low-quality sites.
-Do NOT claim access to paid sources such as UpToDate unless explicitly available in the search result.
-Return concise evidence notes with source names and visible citations.
-
-Clinical focus:
-- Stage: {stage}
-- Neurology focus: {focus}
-- General medicine focus: {body_system_focus}
-
-Patient/case context:
-{context}
-
-Return:
-1. Key guideline/evidence points relevant to triage, red flags, clinical exam, workup, imaging, and medication safety.
-2. For each major recommendation, include a SPECIFIC source, not a generic organization homepage:
-   - exact source title
-   - organization/publisher
-   - year/date if visible
-   - source URL/citation if visible
-   - exact evidence point in your own words
-   - limitation or when it does not apply
-3. Specifically search evidence for syncope/presyncope with palpitations, ECG, orthostatic vitals, ambulatory ECG monitoring, and neuroimaging indications.
-4. If only a generic webpage is found, mark it as needs_manual_reference_check rather than strong verified evidence.
-5. What is uncertain or needs specialist/manual reference check.
-6. Sources/citations.
-"""
-
-
-def run_automatic_evidence_search(stage, focus, body_system_focus, context, evidence_model, source_scope, force_search=True):
+def run_evidence_search(stage, context, depth, model):
     key = get_api_key()
     if not key:
-        return "Automatic evidence search skipped: OPENAI_API_KEY is missing."
+        return "Automatic evidence search skipped: OPENAI_API_KEY missing."
 
     client = OpenAI(api_key=key)
-    query = build_evidence_query(stage, focus, body_system_focus, context)
+    query = build_evidence_query(stage, context, depth)
 
-    if source_scope == "Authoritative medical domains only":
-        query += "\n\nIMPORTANT SOURCE RULE: Prefer authoritative medical domains only. Search and use sources from this list when possible: " + ", ".join(AUTHORITATIVE_MEDICAL_DOMAINS) + ". If a source is not from this list, say why it was used."
-
-    # Do NOT pass filters here. Some models reject web_search filters.
-    tool = {"type": "web_search"}
-
-    def _call(required: bool, selected_model: str):
-        kwargs = dict(
-            model=selected_model,
-            tools=[tool],
-            input=query,
-        )
-        if required:
-            kwargs["tool_choice"] = "required"
-        response = client.responses.create(**kwargs)
-        evidence_text = getattr(response, "output_text", None)
-        if not evidence_text:
-            evidence_text = str(response)
-        return evidence_text[:20000]
-
-    try:
-        return _call(force_search, evidence_model)
-    except Exception as e1:
-        # Fallback 1: same model, no required tool choice
+    errors = []
+    for candidate_model in model_fallbacks(model):
         try:
-            return "Automatic evidence search fallback used: same model without required tool_choice.\n\n" + _call(False, evidence_model)
-        except Exception as e2:
-            # Fallback 2: gpt-4o-mini, no required tool choice
+            response = client.responses.create(
+                model=candidate_model,
+                tools=[{"type": "web_search"}],
+                tool_choice="required",
+                input=query,
+            )
+            return f"Evidence search model used: {candidate_model}\n\n" + ((getattr(response, "output_text", None) or str(response))[:25000])
+        except Exception as e1:
+            errors.append(f"{candidate_model} required-search error: {e1}")
             try:
-                return "Automatic evidence search fallback used: gpt-4o-mini without required tool_choice.\n\n" + _call(False, "gpt-4o-mini")
-            except Exception as e3:
-                return f"Automatic evidence search failed. Do not mark recommendations as web-verified. Errors: primary={e1}; fallback1={e2}; fallback2={e3}"
+                response = client.responses.create(
+                    model=candidate_model,
+                    tools=[{"type": "web_search"}],
+                    input=query,
+                )
+                return f"Evidence search fallback used: {candidate_model} without required tool_choice.\n\n" + ((getattr(response, "output_text", None) or str(response))[:25000])
+            except Exception as e2:
+                errors.append(f"{candidate_model} fallback error: {e2}")
+
+    return "Automatic evidence search failed. Do not mark claims as web-verified. Errors:\n" + "\n".join(errors[-8:])
 
 
-
-def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
+def run_ai(stage, context, evidence_files, model, depth, source_mode):
     key = get_api_key()
     if not key:
         st.error("OPENAI_API_KEY غير موجود في Streamlit Secrets.")
         st.stop()
 
     client = OpenAI(api_key=key)
-    content = [{"type": "input_text", "text": stage_instruction(stage, focus, body_system_focus) + "\n\nCASE CONTEXT:\n" + context}]
-    for f in files or []:
+    content = [{"type": "input_text", "text": stage_instruction(stage, depth, source_mode) + "\n\nCASE CONTEXT:\n" + context}]
+
+    for f in evidence_files or []:
         content.append(file_item(f))
 
-    response = client.responses.parse(
-        model=model,
-        input=[
-            {"role": "system", "content": system_prompt(strictness)},
-            {"role": "user", "content": content},
-        ],
-        text_format=GuardAnalysis,
-    )
-    return response.output_parsed
+    errors = []
+    for candidate_model in model_fallbacks(model):
+        try:
+            response = client.responses.parse(
+                model=candidate_model,
+                input=[
+                    {"role": "system", "content": GENERAL_METHOD + f"\n\nClinical analysis model used: {candidate_model}"},
+                    {"role": "user", "content": content},
+                ],
+                text_format=Level5Analysis,
+            )
+            parsed = response.output_parsed
+            parsed.limitations.append(f"Clinical analysis model used: {candidate_model}")
+            if candidate_model != model:
+                parsed.limitations.append(f"Preferred model {model} was unavailable or failed; fallback model used.")
+            return parsed
+        except Exception as e:
+            errors.append(f"{candidate_model}: {e}")
+
+    raise RuntimeError("All model fallbacks failed:\n" + "\n".join(errors[-8:]))
 
 
 # =========================================================
-# Deterministic guardrails
-# These are applied AFTER the model output so critical workflow rules
-# cannot be ignored by the AI response.
+# Generic cleanup: not case-specific
 # =========================================================
 
 def _lc(x):
     return (x or "").lower()
 
 
-def _has_any(text, phrases):
-    t = _lc(text)
-    return any(p.lower() in t for p in phrases)
-
-
-def _module_present(a, module_name):
-    return any(m.module == module_name for m in a.activated_modules)
-
-
-def _dedupe_by_key(items, key_fn):
-    seen = set()
-    out = []
-    for item in items:
-        key = key_fn(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
-    return out
-
-
-def _canonical_test_key(name):
+def canonical_key(name: str):
     t = _lc(name)
-    t = t.replace("resting", "").replace("standard", "")
-    if ("holter" in t or "ambulatory" in t or "event monitor" in t) and ("ecg" in t or "monitor" in t):
-        return "ambulatory_ecg"
     if "ecg" in t or "electrocardiogram" in t:
-        return "12_lead_ecg"
+        if "holter" in t or "ambulatory" in t or "event" in t:
+            return "ambulatory_ecg"
+        return "ecg"
     if "orthostatic" in t:
-        return "orthostatic_bp_hr"
+        return "orthostatic_vitals"
     if "glucose" in t:
-        return "capillary_glucose"
-    if "bmp" in t or "electrolyte" in t or "renal" in t or "mg/ca" in t or "magnesium" in t or "calcium" in t:
-        return "bmp_electrolytes_renal_mg_ca"
+        return "glucose"
     if "cbc" in t:
         return "cbc"
-    if "tsh" in t or "thyroid" in t:
-        return "tsh"
-    if "troponin" in t or "acs" in t:
-        return "troponin_acs"
-    if "d-dimer" in t or "d dimer" in t or "pe workup" in t:
-        return "d_dimer_pe"
-    if "echo" in t:
-        return "echocardiography"
-    if "ct brain" in t or "ct head" in t or ("ct" in t and "neuroimaging" in t):
+    if "bmp" in t or "electrolyte" in t or "renal" in t or "magnesium" in t or "calcium" in t or "mg/ca" in t:
+        return "bmp_electrolytes_renal"
+    if "troponin" in t:
+        return "troponin"
+    if "d-dimer" in t or "d dimer" in t:
+        return "d_dimer"
+    if "ct brain" in t or "ct head" in t:
         return "ct_brain"
-    if "mri brain" in t or ("mri" in t and "neuroimaging" in t):
+    if "mri brain" in t:
         return "mri_brain"
     if "cta" in t or "mra" in t:
-        return "cta_mra_head_neck"
+        return "cta_mra"
     if "eeg" in t:
         return "eeg"
-    if "cardiology" in t and ("referral" in t or "consult" in t):
-        return "cardiology_referral"
-    return "".join(ch for ch in t if ch.isalnum() or ch == " ")[:60]
+    if "echo" in t:
+        return "echo"
+    return "".join(ch for ch in t if ch.isalnum() or ch == " ")[:70]
 
 
-def _timing_rank(timing):
+def timing_rank(x):
     order = {
-        "must_do_now": 0,
-        "urgent": 0,
-        "same_day_if_available": 1,
-        "important": 1,
-        "conditional_next_step": 2,
-        "routine": 3,
-        "specialist_level": 3,
-        "not_now": 4,
-        "not_indicated_now": 4,
+        "urgent_now": 0, "must_do_now": 0, "emergency": 0,
+        "same_day": 1, "same_day_if_available": 1,
+        "conditional": 2, "conditional_next_step": 2,
+        "routine": 3, "specialist_level": 3,
+        "not_now": 4, "not_indicated_now": 4,
     }
-    return order.get(str(timing), 9)
+    return order.get(str(x), 9)
 
 
-def _dedupe_tests_keep_stronger(items, name_getter, timing_getter):
+def dedupe_keep_strongest(items, name_fn, timing_fn):
     best = {}
-    order = []
+    sequence = []
     for item in items:
-        key = _canonical_test_key(name_getter(item))
+        key = canonical_key(name_fn(item))
         if key not in best:
             best[key] = item
-            order.append(key)
+            sequence.append(key)
         else:
-            old = best[key]
-            if _timing_rank(timing_getter(item)) < _timing_rank(timing_getter(old)):
+            if timing_rank(timing_fn(item)) < timing_rank(timing_fn(best[key])):
                 best[key] = item
-    return [best[k] for k in order]
+    return [best[k] for k in sequence]
 
 
-def _question_key(txt):
-    t = _lc(txt)
-    if "complete syncope" in t or "loss of consciousness" in t or "إغماء كامل" in t:
-        return "complete_syncope"
-    if "exertion" in t or "supine" in t or "جهد" in t or "استلقاء" in t:
-        return "exertional_supine"
-    if "chest pain" in t or "severe shortness" in t or "dyspnea" in t or "diaphoresis" in t:
-        return "chest_dyspnea_acs_pe"
-    if "start and stop" in t or "sudden" in t and "palp" in t:
-        return "palpitation_pattern"
-    if "sudden cardiac death" in t or "structural heart" in t:
-        return "family_structural"
-    if "caffeine" in t or "stimulant" in t or "decongestant" in t or "qt-risk" in t:
-        return "substance_meds"
-    if "vomiting" in t or "diarrhea" in t or "dehydration" in t or "poor intake" in t:
-        return "dehydration"
-    if "bleeding" in t or "melena" in t or "anemia" in t or "pallor" in t:
-        return "anemia_bleeding"
-    if "glucose" in t or "diabetes" in t or "fasting" in t:
-        return "glucose"
-    return "".join(ch for ch in t[:45] if ch.isalnum() or ch == " ")
+def generic_cleanup(a: Level5Analysis) -> Level5Analysis:
+    # Dedupe lists without disease-specific logic.
+    seen = set()
+    specs = []
+    for s in a.activated_specialties:
+        key = _lc(s.specialty)
+        if key not in seen:
+            specs.append(s)
+            seen.add(key)
+    a.activated_specialties = specs
 
+    a.recommended_workup = dedupe_keep_strongest(a.recommended_workup, lambda x: x.test_or_action, lambda x: x.priority)
+    a.comprehensive_diagnostic_map = dedupe_keep_strongest(a.comprehensive_diagnostic_map, lambda x: x.test_or_image, lambda x: x.timing)
+    a.comprehensive_diagnostic_map = sorted(a.comprehensive_diagnostic_map, key=lambda x: (timing_rank(x.timing), x.category, x.test_or_image))
 
-def _append_question_if_missing(question_list, question, stage, domain, why, impact, priority="must_ask_now"):
-    key = _question_key(question)
-    existing = {_question_key(q.question) for q in question_list}
-    if key not in existing:
-        question_list.append(StageQuestion(
-            question=question,
-            stage=stage,
-            domain=domain,
-            why_ask=why,
-            how_answer_changes_decision=impact,
-            priority=priority
+    # If no map returned, add a generic warning map placeholder.
+    if not a.comprehensive_diagnostic_map:
+        a.comprehensive_diagnostic_map.append(DiagnosticMapItem(
+            test_or_image="Diagnostic map missing from model output",
+            category="other",
+            timing="conditional_next_step",
+            indication_in_this_case="The model did not return a diagnostic map.",
+            trigger_to_order="Repeat analysis or provide more case details.",
+            why_not_now_if_not_indicated="Not applicable.",
+            what_result_would_change="Not applicable.",
+            protocol_or_notes="Use this as a quality-control flag.",
+            danger_if_missed_when_indicated="Without a map, tests/images may be under-considered."
         ))
 
-
-def _append_workup_if_missing(a, test_name, type_, priority, why, changes, avoid):
-    key = test_name.lower()
-    if not any(key in _lc(w.test_or_action) for w in a.recommended_workup):
-        a.recommended_workup.append(WorkupItem(
-            test_or_action=test_name,
-            type=type_,
-            priority=priority,
-            why_needed=why,
-            what_result_changes=changes,
-            avoid_if_not_indicated=avoid
-        ))
-
-
-def _append_diag_option_if_missing(a, test_or_image, category, timing, indication, trigger, why_not_now, changes, protocol, danger):
-    key = _canonical_test_key(test_or_image)
-    if not any(key == _canonical_test_key(d.test_or_image) for d in a.comprehensive_diagnostic_map):
-        a.comprehensive_diagnostic_map.append(DiagnosticOption(
-            test_or_image=test_or_image,
-            category=category,
-            timing=timing,
-            indication_in_this_case=indication,
-            trigger_to_order=trigger,
-            why_not_now_if_not_indicated=why_not_now,
-            what_result_would_change=changes,
-            protocol_or_notes=protocol,
-            danger_if_missed=danger
-        ))
-
-
-def _append_action_if_missing(a, step, when, action, reason, escalation):
-    key = _lc(step) + "|" + _lc(when)
-    if not any((_lc(x.step) + "|" + _lc(x.when)) == key for x in a.action_pathway):
-        a.action_pathway.append(ActionPathwayItem(
-            step=step,
-            when=when,
-            action=action,
-            reason=reason,
-            escalation=escalation
-        ))
-
-
-def _append_exam_protocol_if_missing(a, exam_item, section, priority, setup, steps, record, normal, abnormal, stop):
-    key = exam_item.lower()
-    if not any(key in _lc(e.exam_item) for e in a.detailed_exam_protocol):
-        a.detailed_exam_protocol.append(ExamProtocolStep(
-            exam_section=section,
-            exam_item=exam_item,
-            patient_position_or_setup=setup,
-            how_to_perform_step_by_step=steps,
-            what_to_record_exactly=record,
-            normal_expected_finding=normal,
-            abnormal_findings_and_meaning=abnormal,
-            safety_precaution_or_stop_condition=stop,
-            priority=priority
-        ))
-
-
-def _append_followup_if_missing(a, situation, action, timeframe):
-    key = situation.lower()
-    if not any(key in _lc(f.situation) for f in a.follow_up_thresholds):
-        a.follow_up_thresholds.append(FollowUpThreshold(
-            situation=situation,
-            action=action,
-            timeframe=timeframe
-        ))
-
-
-def _no_focal_neuro_context(context):
-    t = _lc(context)
-    absent_markers = [
-        "no focal", "no weakness", "no numbness", "no speech", "no vision loss",
-        "no diplopia", "no ataxia", "no focal neurological deficits",
-        "no focal neurologic", "لا يوجد ضعف", "لا يوجد تنميل", "لا يوجد اضطراب كلام",
-        "لا يوجد فقدان نظر", "لا يوجد علامات عصبية بؤرية"
-    ]
-    positive_focal = [
-        "unilateral weakness", "aphasia", "dysarthria", "vision loss", "diplopia",
-        "ataxia", "hemiparesis", "focal deficit", "فقدان نظر", "حبسة", "ضعف جهة",
-        "ترنح", "ازدواجية الرؤية"
-    ]
-    return _has_any(t, absent_markers) and not _has_any(t, positive_focal)
-
-
-def _emergency_trigger_present(context):
-    t = _lc(context)
-    # Positive emergency markers. Negated phrases below prevent false triggers.
-    if "no chest pain" not in t and ("chest pain" in t or "ألم صدر" in t):
-        return True
-    if "no complete loss" not in t and ("complete loss of consciousness" in t or "complete syncope" in t):
-        return True
-    if "no seizure" not in t and ("seizure" in t or "tongue bite" in t or "incontinence" in t):
-        return True
-    if "no focal" not in t and ("focal neurologic" in t or "focal neurological" in t):
-        return True
-    if "severe dyspnea" in t or "severe shortness of breath" in t or "spo2 8" in t or "spo2 7" in t:
-        return True
-    if "abnormal ecg" in t or "hypotension/shock" in t or "shock" in t:
-        return True
-    if "exertional syncope" in t or "syncope during exertion" in t:
-        return True
-    return False
-
-
-def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnalysis:
-    t = _lc(context)
-
-    palpitations = _has_any(t, ["palpitations", "palpitation", "خفقان"])
-    presyncope = _has_any(t, ["near-syncope", "presyncope", "near faint", "near-faint", "may faint", "قرب الإغماء", "قرب الاغماء"])
-    posture_related = _has_any(t, ["worse when standing", "worsened by standing", "improves when sitting", "عند الوقوف", "يتحسن عند الجلوس"])
-    no_focal = _no_focal_neuro_context(t)
-
-    # Always deduplicate modules/checklists first.
-    a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
-    a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
-
-    if palpitations and presyncope:
-        # Force same-day Cardiology module.
-        if not _module_present(a, "Cardiology"):
-            a.activated_modules.insert(0, ActivatedModule(
-                module="Cardiology",
-                urgency="same_day",
-                why_activated="Palpitations with near-syncope/presyncope require same-day cardiac rhythm evaluation and ECG."
-            ))
-
-        # Add supporting modules if absent.
-        if not _module_present(a, "Endocrinology/Metabolic"):
-            a.activated_modules.append(ActivatedModule(
-                module="Endocrinology/Metabolic",
-                urgency="same_day",
-                why_activated="Hypoglycemia, electrolyte disturbance, and thyroid disease can mimic dizziness/palpitations."
-            ))
-        if not _module_present(a, "Toxicology/Medication Safety"):
-            a.activated_modules.append(ActivatedModule(
-                module="Toxicology/Medication Safety",
-                urgency="same_day",
-                why_activated="Stimulants, decongestants, caffeine, QT-risk drugs, and medication adverse effects must be reviewed."
-            ))
-
-        # Downgrade emergency to same_day if stable and no emergency trigger.
-        if a.safety_gate.emergency_now == "yes" and not _emergency_trigger_present(t):
-            a.safety_gate.emergency_now = "no"
-            a.safety_gate.same_day_assessment_needed = "yes"
-            a.safety_gate.reason = (
-                "Palpitations with near-syncope require same-day ECG and orthostatic/metabolic evaluation. "
-                "Emergency escalation is required if complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, shock, or focal neurologic deficit appears."
-            )
-            a.triage_level = "same_day"
-            a.triage_reason = a.safety_gate.reason
-
-        # Ensure must-not-miss list has cardiac priority.
-        for condition in ["Serious arrhythmia", "Orthostatic hypotension", "Hypoglycemia", "Anemia/bleeding", "Electrolyte disturbance"]:
-            if condition not in a.safety_gate.must_not_miss_conditions:
-                a.safety_gate.must_not_miss_conditions.append(condition)
-
-        # Strong pre-exam questions.
-        q = a.questions_before_exam
-        _append_question_if_missing(q, "Did the patient have complete syncope or only near-syncope/presyncope?", "before_exam", "cardiology",
-                                    "Complete syncope increases risk and changes triage.", "Complete syncope, especially recurrent or injurious, increases urgency.")
-        _append_question_if_missing(q, "Did symptoms occur during exertion or while supine?", "before_exam", "cardiology",
-                                    "Exertional or supine syncope is a higher-risk cardiac pattern.", "If yes, escalate cardiac evaluation urgently.")
-        _append_question_if_missing(q, "Is there chest pain, severe shortness of breath, or new diaphoresis?", "before_exam", "cardiology",
-                                    "These can indicate ACS, arrhythmia, PE, or unstable cardiopulmonary disease.", "If present, emergency pathway and troponin/ACS/PE evaluation may be needed.")
-        _append_question_if_missing(q, "Do palpitations start and stop suddenly, and how fast is the pulse during the episode?", "before_exam", "cardiology",
-                                    "Sudden onset/offset suggests paroxysmal arrhythmia.", "May trigger rhythm monitoring/Holter/event monitor even if initial ECG is normal.")
-        _append_question_if_missing(q, "Is there family history of sudden cardiac death or known structural heart disease?", "before_exam", "cardiology",
-                                    "Family/structural risk increases concern for dangerous arrhythmia.", "If positive, lowers threshold for urgent cardiology review.")
-        _append_question_if_missing(q, "Any caffeine, stimulants, decongestants, thyroid medications, recreational drugs, or QT-risk drugs?", "before_exam", "medication_safety",
-                                    "Substances and medications can provoke tachycardia or arrhythmia.", "May redirect management toward medication/substance review.")
-        _append_question_if_missing(q, "Any vomiting, diarrhea, poor intake, dehydration, or recent heat exposure?", "before_exam", "general_medicine",
-                                    "Volume depletion can cause orthostatic symptoms.", "If positive, supports orthostatic vitals and fluid status assessment.")
-        _append_question_if_missing(q, "Any bleeding, melena, heavy menses, pallor, or progressive fatigue suggesting anemia?", "before_exam", "hematology",
-                                    "Anemia/bleeding can cause tachycardia, dizziness, and presyncope.", "If positive, CBC and bleeding evaluation become higher priority.")
-        _append_question_if_missing(q, "Was capillary glucose checked during symptoms or is there diabetes/fasting/recent diet change?", "before_exam", "endocrine_metabolic",
-                                    "Hypoglycemia can mimic dizziness/palpitations.", "Low glucose changes immediate management.")
-
-        # Workup guardrails.
-        _append_workup_if_missing(a, "Capillary blood glucose", "bedside_test", "urgent",
-                                  "Hypoglycemia can cause dizziness, palpitations, and presyncope.", "Low glucose requires immediate correction.", "Do not delay if patient is symptomatic.")
-        _append_workup_if_missing(a, "BMP/electrolytes/renal function including Mg/Ca if available", "lab", "important",
-                                  "Electrolyte, magnesium/calcium, renal, and volume-related abnormalities can trigger palpitations or presyncope.", "Abnormal results guide correction, medication safety, and arrhythmia risk assessment.", "Do not delay ECG/urgent stabilization while waiting for labs.")
-        _append_workup_if_missing(a, "CBC", "lab", "important",
-                                  "Screens for anemia/bleeding/infection when dizziness with tachycardia is present.", "Anemia or leukocytosis redirects evaluation.", "May be less urgent if no anemia/bleeding/systemic clues and patient is stable.")
-        _append_workup_if_missing(a, "TSH if recurrent palpitations or unexplained persistent tachycardia", "lab", "routine",
-                                  "Hyperthyroidism can cause palpitations and tachycardia.", "Abnormal TSH changes outpatient endocrine/cardiac follow-up.", "Not a substitute for ECG or urgent evaluation.")
-        _append_workup_if_missing(a, "Holter/event monitor if ECG is normal but episodes recur", "monitoring", "important",
-                                  "Intermittent arrhythmias may be missed on a single ECG.", "Captured rhythm during symptoms can confirm arrhythmia.", "Not first-line replacement for immediate ECG in current symptoms.")
-
-        # Stronger clinical exam protocol: not just visually.
-        _append_exam_protocol_if_missing(
-            a, "Palpate radial pulse and auscultate heart rhythm", "cardiovascular", "must_do_now",
-            "Patient seated or supine; fall precautions because of presyncope.",
-            ["Palpate radial pulse for 30-60 seconds.", "Auscultate heart at standard valve areas.", "Assess rate, regularity, extra beats, murmurs, and perfusion."],
-            ["pulse rate", "regular vs irregular rhythm", "murmur present/absent", "perfusion signs"],
-            "Regular rhythm, no murmur, adequate perfusion.",
-            ["Irregular rhythm suggests arrhythmia.", "Murmur suggests possible structural disease.", "Poor perfusion suggests urgent escalation."],
-            "Stop and escalate if chest pain, severe dyspnea, hypotension, syncope, or unstable rhythm occurs."
-        )
-        _append_exam_protocol_if_missing(
-            a, "Orthostatic BP and HR measurement", "orthostatic_vitals", "must_do_now",
-            "Supine then standing with support; fall precautions.",
-            ["Measure BP/HR after resting supine.", "Stand patient with support.", "Measure BP/HR after standing and record symptoms.", "Repeat according to local protocol if needed."],
-            ["supine BP/HR", "standing BP/HR", "symptoms during standing", "time points used"],
-            "No significant BP drop and no excessive HR rise with standing.",
-            ["BP drop supports orthostatic hypotension.", "Excessive HR rise supports volume depletion/autonomic physiology.", "Symptoms with abnormal vitals support orthostatic cause."],
-            "Stop if severe presyncope, syncope, chest pain, severe dyspnea, or unsafe gait."
-        )
-        _append_exam_protocol_if_missing(
-            a, "Focused neurologic screen", "neurologic", "important",
-            "Patient seated; stand/gait only if safe.",
-            ["Check mental status and speech.", "Check pupils/EOM/visual fields if relevant.", "Check limb power, sensation, coordination.", "Assess gait only if safe."],
-            ["speech", "cranial nerve screen", "power", "sensation", "coordination", "gait"],
-            "Normal speech, cranial nerve screen, strength, coordination, and gait.",
-            ["Focal deficit changes priority toward stroke/TIA/brain imaging.", "Ataxia/diplopia/weakness/speech change are neuro red flags."],
-            "Do not perform gait testing if patient may faint; escalate if focal neurologic deficit appears."
-        )
-
-        # Comprehensive Diagnostic Map: broad roadmap, not automatic overtesting.
-        _append_diag_option_if_missing(a, "12-lead ECG", "cardiac", "must_do_now",
-            "Palpitations with near-syncope and tachycardia.", "Any palpitations with presyncope/syncope or tachycardia.", "It is indicated now.", "Detects arrhythmia, conduction disease, ischemic patterns, QT prolongation.", "Obtain during symptoms if possible.", "Missing arrhythmia can miss a dangerous cardiac cause.")
-        _append_diag_option_if_missing(a, "Orthostatic BP/HR", "bedside", "must_do_now",
-            "Symptoms worsen standing and improve sitting.", "Posture-related dizziness/presyncope.", "It is indicated now.", "Confirms orthostatic hypotension or abnormal HR response.", "Use fall precautions.", "Missing orthostatic hypotension may miss dehydration/autonomic cause.")
-        _append_diag_option_if_missing(a, "Capillary glucose", "bedside", "must_do_now",
-            "Hypoglycemia can mimic dizziness/palpitations.", "Dizziness, presyncope, fasting/diabetes risk, altered symptoms.", "It is rapid and low burden, so indicated now.", "Low glucose changes immediate management.", "Check during symptoms if possible.", "Missing hypoglycemia can cause preventable deterioration.")
-        _append_diag_option_if_missing(a, "BMP/electrolytes/renal function including Mg/Ca if available", "lab", "same_day_if_available",
-            "Electrolyte and renal abnormalities can provoke palpitations or presyncope.", "Unexplained tachycardia, dehydration risk, medication risk, arrhythmia concern.", "May be conditional if symptoms are fully explained and mild, but useful same day.", "Identifies electrolyte/renal causes and medication safety risks.", "Include K/Mg/Ca when arrhythmia concern.", "Missing electrolyte disturbance can miss reversible arrhythmia triggers.")
-        _append_diag_option_if_missing(a, "CBC", "lab", "conditional_next_step",
-            "Anemia/bleeding/infection can cause tachycardia and presyncope.", "Pallor, fatigue, bleeding, melena, heavy menses, infection signs, persistent tachycardia.", "If no anemia/bleeding/systemic clues, less urgent but still reasonable in many clinics.", "Detects anemia, infection clues, platelet issues.", "Pair with bleeding history and exam.", "Missing anemia/bleeding can miss serious systemic cause.")
-        _append_diag_option_if_missing(a, "TSH", "lab", "conditional_next_step",
-            "Thyroid disease can cause tachycardia/palpitations.", "Recurrent/persistent palpitations, tremor, weight loss, heat intolerance, goiter, unexplained tachycardia.", "Not first emergency test before ECG/glucose/vitals.", "Abnormal result redirects endocrine/cardiac follow-up.", "Outpatient unless severe thyrotoxic features.", "Missing hyperthyroidism can prolong arrhythmia risk.")
-        _append_diag_option_if_missing(a, "Troponin / ACS pathway", "lab", "conditional_next_step",
-            "ACS can present with cardiopulmonary symptoms.", "Chest pain, ischemic symptoms, abnormal ECG, diaphoresis, high cardiac risk.", "No chest pain/ischemic features currently, so not automatic.", "Positive troponin changes to ACS pathway.", "Use local chest pain protocol.", "Missing ACS is dangerous.")
-        _append_diag_option_if_missing(a, "D-dimer / PE workup", "lab", "conditional_next_step",
-            "PE can cause tachycardia, dyspnea, presyncope.", "Significant dyspnea, pleuritic chest pain, hypoxia, leg swelling, immobilization, cancer, VTE risk.", "Mild dyspnea with normal SpO2 and no PE risks does not automatically justify it.", "Positive workup may lead to CT pulmonary angiography/anticoagulation pathway.", "Use Wells/PERC/local protocol.", "Missing PE can be life-threatening.")
-        _append_diag_option_if_missing(a, "Holter/event monitor", "cardiac", "conditional_next_step",
-            "Intermittent arrhythmias may not appear on single ECG.", "Recurrent episodes or high suspicion after nondiagnostic ECG.", "Not a replacement for immediate ECG.", "Captures rhythm during symptoms.", "Choose duration based on frequency.", "Missing intermittent arrhythmia can miss syncope cause.")
-        _append_diag_option_if_missing(a, "Echocardiography", "cardiac", "conditional_next_step",
-            "Structural heart disease can cause exertional syncope/arrhythmia.", "Murmur, abnormal ECG, known heart disease, exertional/supine syncope, heart failure signs.", "Not automatic if exam and ECG are normal and no structural clues.", "Identifies structural/valvular/cardiomyopathy causes.", "Cardiology-directed if abnormal.", "Missing structural disease can miss high-risk syncope cause.")
-        _append_diag_option_if_missing(a, "CT brain", "imaging_brain", "not_indicated_now",
-            "No focal neuro deficit, seizure, trauma, severe headache, or anticoagulant head injury in current data.", "Order if acute focal deficit, head trauma, anticoagulated trauma, thunderclap headache, seizure, altered mental status, suspected bleed.", "No neuro red flags now; over-imaging can mislead and delay cardiac evaluation.", "Detects hemorrhage/mass/acute intracranial process when indicated.", "Use emergency protocol if red flags appear.", "Missing intracranial emergency is dangerous when red flags exist.")
-        _append_diag_option_if_missing(a, "MRI brain ± MRA/MRV if indicated", "imaging_brain", "not_indicated_now",
-            "No focal neurologic syndrome or central vertigo signs currently.", "Order if persistent focal neurologic signs, posterior circulation symptoms, ataxia, diplopia, stroke/TIA syndrome, papilledema/raised ICP signs.", "Not indicated now because presentation is cardiac/orthostatic pattern.", "Can detect ischemia, mass, demyelination, posterior fossa pathology, venous thrombosis when protocol appropriate.", "Protocol depends on suspected diagnosis.", "Missing posterior circulation stroke is dangerous when focal/central signs exist.")
-        _append_diag_option_if_missing(a, "CTA/MRA head-neck", "imaging_vascular", "not_indicated_now",
-            "No stroke/TIA syndrome currently.", "Order if focal neurologic deficits, suspected large vessel event, dissection signs, severe acute neurologic syndrome.", "Not indicated now without focal neurologic signs.", "Detects vascular occlusion/stenosis/dissection.", "Use stroke pathway if triggered.", "Missing vascular emergency is dangerous when stroke signs appear.")
-        _append_diag_option_if_missing(a, "EEG", "neurophysiology", "not_indicated_now",
-            "No seizure movements, tongue bite, incontinence, or postictal confusion.", "Order if seizure-like event, recurrent unexplained LOC with seizure features, postictal state.", "Not indicated now for pure presyncope/palpitations.", "Supports seizure diagnosis when clinically suspected.", "Neurology-directed.", "Missing seizure matters when seizure features exist.")
-
-        # TIA guardrail.
-        if no_focal and posture_related:
-            for d in a.differential_diagnosis:
-                if "transient ischemic" in _lc(d.diagnosis_or_category) or "tia" in _lc(d.diagnosis_or_category):
-                    d.probability = "low"
-                    if "No focal neurological deficits; symptoms are posture-related with palpitations." not in d.features_against:
-                        d.features_against.append("No focal neurological deficits; symptoms are posture-related with palpitations.")
-                    d.confirm_or_exclude_step = (
-                        "Do not prioritize TIA unless focal neurologic symptoms appear "
-                        "(weakness, speech disturbance, vision loss/diplopia, ataxia) or the clinical picture changes."
-                    )
-
-        # Action pathway: practical if/then plan.
-        _append_action_if_missing(a, "Immediate first-line tests", "now",
-            "Perform 12-lead ECG, orthostatic BP/HR, capillary glucose, and same-day BMP/electrolytes/renal function with Mg/Ca if available.",
-            "These address dangerous and reversible cardiac/metabolic/orthostatic causes.",
-            "Escalate if ECG abnormal, hypotension/shock, complete syncope, chest pain, severe dyspnea, SpO2 drop, seizure, or focal neurologic deficit."
-        )
-        _append_action_if_missing(a, "If ECG is abnormal", "if_abnormal",
-            "Treat as cardiac-risk presyncope/syncope and arrange urgent cardiology/ER pathway depending on abnormality and stability.",
-            "Arrhythmia, conduction disease, QT prolongation, or ischemic changes can explain near-syncope and may be dangerous.",
-            "Immediate ER/cardiology if unstable rhythm, ischemia, high-grade block, prolonged QT with symptoms, or persistent tachyarrhythmia."
-        )
-        _append_action_if_missing(a, "If orthostatic vitals are positive", "if_abnormal",
-            "Assess volume status, dehydration, bleeding/anemia, medication/substance causes, and manage fluid/status per clinician judgment.",
-            "Posture-related symptoms with objective BP/HR change support an orthostatic mechanism.",
-            "Escalate if severe hypotension, syncope, shock, or inability to stand safely."
-        )
-        _append_action_if_missing(a, "If ECG and basic tests are normal but episodes recur", "if_normal_but_recurrent",
-            "Use Holter/event monitor and consider cardiology referral; consider echo if murmur, abnormal ECG history, exertional/supine symptoms, or known heart disease.",
-            "Intermittent arrhythmias may be missed on a single ECG.",
-            "Escalate urgently if recurrence involves syncope, injury, exertion, chest pain, severe dyspnea, or abnormal vitals."
-        )
-        _append_action_if_missing(a, "If neurologic red flags appear", "if_red_flag",
-            "Switch to neurologic emergency pathway and consider CT/MRI brain, CTA/MRA, EEG, or other tests based on the red flag.",
-            "Focal deficit, seizure, severe new headache, ataxia/diplopia, or altered mental status changes the differential.",
-            "Immediate ER/stroke/seizure pathway if focal deficits, seizure, thunderclap headache, or altered mental status occur."
-        )
-
-        # Differential ranking cleanup.
-        has_arr = False
-        has_orth = False
-        for d in a.differential_diagnosis:
-            name = _lc(d.diagnosis_or_category)
-            if "arrhythm" in name:
-                d.probability = "high"
-                d.urgency = "same_day"
-                d.specialty_domain = "Cardiology"
-                has_arr = True
-            if "orthostatic" in name or "postural" in name:
-                if posture_related:
-                    d.probability = "high"
-                d.urgency = "same_day"
-                d.specialty_domain = "General Medicine / Cardiology"
-                has_orth = True
-        if not has_arr:
-            a.differential_diagnosis.insert(0, DifferentialItem(
-                diagnosis_or_category="Cardiac arrhythmia",
-                specialty_domain="Cardiology",
-                probability="high",
-                urgency="same_day",
-                supporting_features=["Palpitations with near-syncope", "Tachycardia"],
-                features_against=[],
-                missing_data_needed=["ECG", "rhythm during symptoms"],
-                confirm_or_exclude_step="12-lead ECG now; Holter/event monitor if ECG normal but episodes recur."
-            ))
-        if not has_orth:
-            a.differential_diagnosis.insert(1, DifferentialItem(
-                diagnosis_or_category="Orthostatic hypotension / postural presyncope",
-                specialty_domain="General Medicine / Cardiology",
-                probability="high" if posture_related else "medium",
-                urgency="same_day",
-                supporting_features=["Worse standing", "Improves sitting"],
-                features_against=[],
-                missing_data_needed=["Orthostatic BP/HR"],
-                confirm_or_exclude_step="Orthostatic BP/HR with symptoms recorded."
-            ))
-
-        # Referral / ER thresholds.
-        a.referral_or_er_threshold = (
-            "Immediate ER/cardiology escalation if complete syncope, exertional syncope, chest pain, severe dyspnea, "
-            "abnormal ECG, hypotension/shock, persistent tachyarrhythmia, SpO2 drop, seizure, new severe headache, "
-            "or any focal neurologic deficit. Otherwise same-day ECG, orthostatic vitals, glucose/electrolytes, and follow-up based on results."
-        )
-        _append_followup_if_missing(a, "Complete syncope, exertional syncope, chest pain, severe dyspnea, abnormal ECG, hypotension, persistent tachyarrhythmia, SpO2 drop, seizure, or focal neurologic deficit",
-                                    "Immediate ER/cardiology escalation.", "immediate_ER")
-
-        # Evidence guardrail for TIA overclaim/mismatched citations.
-        for ev in a.evidence_verification:
-            ev_all = " ".join([_lc(ev.clinical_question), _lc(ev.recommendation_or_claim), _lc(ev.source_title), _lc(ev.reference_name_or_note), _lc(ev.source_url_or_citation)])
-            if ("tia" in ev_all or "transient ischemic" in ev_all) and no_focal:
-                ev.evidence_strength = "low"
-                ev.verification_status = "needs_manual_reference_check"
-                ev.how_it_changes_recommendation = "In this case, absence of focal neurologic signs makes TIA lower priority than cardiac/orthostatic/metabolic causes."
-                ev.caution = "Do not treat nonspecific dizziness/presyncope as TIA unless focal neurologic deficits or a true TIA syndrome appears."
-            if "pmc3295536" in _lc(ev.source_url_or_citation) and ("tia" in _lc(ev.source_title) or "transient ischemic" in _lc(ev.source_title)):
-                ev.verification_status = "needs_manual_reference_check"
-                ev.caution = "Potential citation mismatch: verify that the URL actually matches the stated TIA source before relying on it."
-            if _has_any(ev.source_url_or_citation, ["heart.org/en/professional/clinical-resources"]) or _lc(ev.source_title).strip() in ["american heart association", "european society of cardiology"]:
-                if ev.verification_status == "verified_from_web_search":
-                    ev.verification_status = "needs_manual_reference_check"
-                    ev.caution = (ev.caution + " Source appears broad/general; verify exact guideline title and section before relying on this as strong evidence.").strip()
-            if _has_any(ev.source_url_or_citation, ["heart.org/en/professional/clinical-resources", "clinical-resources"]) and _lc(ev.source_title).strip() in ["aha scientific statement on palpitations", "american heart association guidelines"]:
-                ev.verification_status = "needs_manual_reference_check"
-                ev.caution = "Generic organization page or nonspecific source title; verify the exact guideline/scientific statement before treating as strong evidence."
-
-    # Differential domain cleanup.
-    for d in a.differential_diagnosis:
-        name = _lc(d.diagnosis_or_category)
-        if "neurocardiogenic" in name or "vasovagal" in name:
-            d.specialty_domain = "General Medicine / Cardiology"
-            if d.probability == "high" and palpitations and presyncope:
-                d.probability = "medium"
-
-    # If diagnostic map is unexpectedly empty in a palpitations + presyncope case, force core map again.
-    if palpitations and presyncope and len(a.comprehensive_diagnostic_map) == 0:
-        _append_diag_option_if_missing(a, "12-lead ECG", "cardiac", "must_do_now",
-            "Palpitations with near-syncope.", "Any presyncope/syncope with palpitations.", "Indicated now.", "Detects arrhythmia/conduction/QT/ischemic patterns.", "Obtain during symptoms if possible.", "Dangerous arrhythmia may be missed.")
-        _append_diag_option_if_missing(a, "Orthostatic BP/HR", "bedside", "must_do_now",
-            "Symptoms worsen with standing.", "Posture-related presyncope.", "Indicated now.", "Detects orthostatic hypotension or abnormal HR response.", "Fall precautions.", "Volume/autonomic cause may be missed.")
-        _append_diag_option_if_missing(a, "CT/MRI brain", "imaging_brain", "not_indicated_now",
-            "No focal neuro signs now.", "Order only if focal deficit, seizure, severe new headache, trauma, altered mental status, ataxia/diplopia, raised ICP signs.", "Not indicated now; cardiac/orthostatic pattern.", "Detects intracranial emergency when triggered.", "Use emergency neuro protocol if triggered.", "Neuro emergencies matter when red flags appear.")
-
-    # Final dedupe again.
-    a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
-    a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
-    a.recommended_workup = _dedupe_tests_keep_stronger(a.recommended_workup, lambda w: w.test_or_action, lambda w: w.priority)
-    a.comprehensive_diagnostic_map = _dedupe_tests_keep_stronger(a.comprehensive_diagnostic_map, lambda d: d.test_or_image, lambda d: d.timing)
-    a.follow_up_thresholds = _dedupe_by_key(a.follow_up_thresholds, lambda f: (f.timeframe, f.situation.lower()))
-    a.action_pathway = _dedupe_by_key(a.action_pathway, lambda x: (_lc(x.when), _lc(x.step)))
-    a.comprehensive_diagnostic_map = sorted(a.comprehensive_diagnostic_map, key=lambda d: (_timing_rank(d.timing), d.category, d.test_or_image))
     return a
 
 
 # =========================================================
-# Report/render
+# Rendering
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.6 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     md = report_markdown(a)
-    (DATA_DIR / f"neuro_general_guard_{stamp}.md").write_text(md, encoding="utf-8")
-    (DATA_DIR / f"neuro_general_guard_{stamp}.json").write_text(json.dumps({
+    (DATA_DIR / f"level5_report_{stamp}.md").write_text(md, encoding="utf-8")
+    (DATA_DIR / f"level5_report_{stamp}.json").write_text(json.dumps({
         "created": stamp,
         "context": context,
         "analysis": a.model_dump()
@@ -1226,279 +645,214 @@ def save_report(context, a):
     return md
 
 
-def render_questions(title, questions):
-    if questions:
+def box(class_name, html):
+    st.markdown(f"<div class='{class_name}'>{html}</div>", unsafe_allow_html=True)
+
+
+def render_questions(title, items):
+    if items:
         st.subheader(title)
-        for idx, q in enumerate(questions, start=1):
-            st.markdown(f"**{idx}. {q.priority} / {q.domain}**")
-            st.write("**Question:**", q.question)
-            st.write("**Why:**", q.why_ask)
-            st.write("**How answer changes decision:**", q.how_answer_changes_decision)
-            st.divider()
+        for i, q in enumerate(items, 1):
+            with st.expander(f"{i}. {q.priority} / {q.domain} — {q.question}"):
+                st.write("**Stage:**", q.stage)
+                st.write("**Why:**", q.why_ask)
+                st.write("**Decision impact:**", q.how_answer_changes_decision)
 
 
-def render(a):
-    st.subheader("Clinical Dashboard")
-    d1, d2, d3, d4, d5 = st.columns(5)
-    d1.metric("Triage", a.triage_level)
-    d2.metric("Emergency", a.safety_gate.emergency_now)
-    d3.metric("Modules", len(a.activated_modules))
-    d4.metric("Red flags", len(a.red_flags))
-    d5.metric("Diff Dx", len(a.differential_diagnosis))
+def render(a: Level5Analysis):
+    st.subheader("Level-5 Clinical Dashboard")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Triage", a.safety_gate.triage_level)
+    c2.metric("Emergency", a.safety_gate.emergency_now)
+    c3.metric("Specialties", len(a.activated_specialties))
+    c4.metric("Differentials", len(a.differential_diagnosis))
+    c5.metric("Diagnostic map", len(a.comprehensive_diagnostic_map))
 
-    st.markdown(f"""
-    <div class='workflow-card'>
-    <div class='title-big'>🧠 Neuro-General Summary</div>
+    box("workflow-card", f"""
+    <div class='title-big'>🧠 Level-5 Summary</div>
     <b>{a.case_summary}</b><br><br>
     <b>Problem representation:</b><br>{a.problem_representation}
-    </div>
-    """, unsafe_allow_html=True)
+    """)
 
-    if a.safety_gate.emergency_now == "yes":
+    if a.safety_gate.triage_level == "emergency":
         st.error(f"SAFETY GATE: EMERGENCY — {a.safety_gate.reason}")
-    elif a.safety_gate.same_day_assessment_needed == "yes":
+    elif a.safety_gate.triage_level == "same_day":
         st.warning(f"SAFETY GATE: SAME DAY — {a.safety_gate.reason}")
     else:
-        st.success(f"SAFETY GATE: no immediate emergency detected — {a.safety_gate.reason}")
+        st.info(f"SAFETY GATE: {a.safety_gate.triage_level} — {a.safety_gate.reason}")
 
-    st.markdown(f"""
-    <div class='red-box'>
+    box("red-box", f"""
+    <b>Immediate action:</b> {a.safety_gate.immediate_action}<br>
     <b>Must-not-miss:</b> {", ".join(a.safety_gate.must_not_miss_conditions) if a.safety_gate.must_not_miss_conditions else "—"}<br>
-    <b>Immediate action:</b> {a.safety_gate.immediate_action}
-    </div>
-    """, unsafe_allow_html=True)
+    <b>Red flag thresholds:</b> {", ".join(a.safety_gate.red_flag_thresholds) if a.safety_gate.red_flag_thresholds else "—"}
+    """)
 
-    if a.activated_modules:
-        st.subheader("Activated Modules")
-        for m in a.activated_modules:
-            st.info(f"**{m.urgency}: {m.module}** — {m.why_activated}")
+    if a.activated_specialties:
+        st.subheader("Activated Specialties")
+        for s in a.activated_specialties:
+            box("blue-box", f"""
+            <b>{s.urgency}: {s.specialty}</b><br>
+            <b>Why:</b> {s.why_relevant}<br>
+            <b>Must rule out:</b> {", ".join(s.what_this_specialty_must_rule_out) if s.what_this_specialty_must_rule_out else "—"}
+            """)
 
-    if a.missing_critical_data:
-        st.subheader("Missing Critical Data")
-        for x in a.missing_critical_data:
-            st.warning(f"{x.item}: {x.why_required} | blocks safe decision: {x.blocks_safe_decision}")
+    if a.evidence_verification:
+        st.subheader("Evidence Verification")
+        for e in a.evidence_verification:
+            cls = "green-box" if e.verification_status in ["verified_from_web_search", "verified_from_uploaded_or_entered_reference"] else "orange-box"
+            box(cls, f"""
+            <b>Question:</b> {e.clinical_question}<br>
+            <b>Claim:</b> {e.recommendation_or_claim}<br>
+            <b>Source:</b> {e.source_title} — {e.source_organization} — {e.source_year_or_date}<br>
+            <b>Citation:</b> {e.url_or_citation}<br>
+            <b>Evidence point:</b> {e.evidence_point}<br>
+            <b>Strength:</b> {e.evidence_strength}<br>
+            <b>Status:</b> {e.verification_status}<br>
+            <b>Applicability:</b> {e.applicability_to_this_case}<br>
+            <b>Caution:</b> {e.limitation_or_caution}
+            """)
 
-    if a.guideline_checklist:
-        st.subheader("Clinical Checklists")
-        for g in a.guideline_checklist:
-            cls = "red-box" if g.status_from_case in ["present", "unknown"] else "green-box"
-            st.markdown(f"""
-            <div class='{cls}'>
-            <b>{g.checklist_name}: {g.item}</b><br>
-            <b>Status:</b> {g.status_from_case}<br>
-            <b>Action:</b> {g.action_if_present_or_unknown}
-            </div>
-            """, unsafe_allow_html=True)
+    if a.clinical_reasoning_summary:
+        st.subheader("Clinical Reasoning Summary")
+        for r in a.clinical_reasoning_summary:
+            with st.expander(r.hypothesis_or_problem):
+                st.write("**Why considered:**", r.why_considered)
+                st.write("**Supports:**", r.features_supporting or ["—"])
+                st.write("**Against:**", r.features_against or ["—"])
+                st.write("**Missing data:**", r.missing_data_that_would_change_it or ["—"])
+                st.write("**Next step:**", r.next_best_step)
 
-    render_questions("Questions BEFORE clinical exam", a.questions_before_exam)
-    render_questions("Questions AFTER exam findings", a.questions_after_exam)
-    render_questions("Questions BEFORE labs/imaging", a.questions_before_labs_imaging)
-    render_questions("Questions AFTER labs/imaging results", a.questions_after_labs_imaging)
-    render_questions("Questions BEFORE medication/treatment", a.questions_before_medication)
-    render_questions("Questions AFTER medication safety review", a.questions_after_medication_safety)
+    if a.missing_data:
+        st.subheader("Missing Data")
+        for m in a.missing_data:
+            st.warning(f"**{m.item}** — {m.why_it_matters} | blocks safe decision: {m.blocks_safe_decision} | get it: {m.how_to_get_it}")
+
+    render_questions("Questions BEFORE exam", a.questions_before_exam)
+    render_questions("Questions AFTER exam", a.questions_after_exam)
+    render_questions("Questions BEFORE tests", a.questions_before_tests)
+    render_questions("Questions AFTER tests", a.questions_after_tests)
+    render_questions("Questions BEFORE treatment", a.questions_before_treatment)
     render_questions("Follow-up questions", a.followup_questions)
 
-    if a.red_flags:
-        st.subheader("Red Flags")
-        for r in a.red_flags:
-            st.markdown(f"""
-            <div class='red-box'>
-            <b>{r.urgency} / {r.domain} / {r.status_from_data}: {r.flag}</b><br>
-            {r.why_dangerous}<br>
-            <b>Threshold/action:</b> {r.action_threshold}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.detailed_exam_protocol:
-        st.subheader("Detailed Clinical Exam Protocol — كيف تعمل الفحص؟")
-        for e in a.detailed_exam_protocol:
-            st.markdown(f"""
-            <div class='blue-box'>
-            <b>{e.priority} / {e.exam_section}: {e.exam_item}</b><br>
-            <b>Patient position/setup:</b> {e.patient_position_or_setup}<br>
-            <b>How to perform:</b><br>
-            {"<br>".join([str(i+1) + ". " + step for i, step in enumerate(e.how_to_perform_step_by_step)]) if e.how_to_perform_step_by_step else "—"}<br>
-            <b>Record exactly:</b> {", ".join(e.what_to_record_exactly) if e.what_to_record_exactly else "—"}<br>
-            <b>Normal expected:</b> {e.normal_expected_finding}<br>
-            <b>Abnormal meaning:</b> {", ".join(e.abnormal_findings_and_meaning) if e.abnormal_findings_and_meaning else "—"}<br>
-            <b>Safety/stop condition:</b> {e.safety_precaution_or_stop_condition}
-            </div>
-            """, unsafe_allow_html=True)
+    if a.exam_protocol:
+        st.subheader("Detailed Clinical Exam Protocol — كيف أفحص؟")
+        for e in a.exam_protocol:
+            cls = "red-box" if e.timing == "must_do_now" else "blue-box"
+            box(cls, f"""
+            <b>{e.timing} / {e.section}: {e.exam_item}</b><br>
+            <b>Setup:</b> {e.patient_position_or_setup}<br>
+            <b>Steps:</b><br>{"<br>".join([str(i+1)+". "+x for i,x in enumerate(e.how_to_perform_step_by_step)]) if e.how_to_perform_step_by_step else "—"}<br>
+            <b>Record:</b> {", ".join(e.record_exactly) if e.record_exactly else "—"}<br>
+            <b>Normal:</b> {e.normal_expected}<br>
+            <b>Abnormal meaning:</b> {", ".join(e.abnormal_meaning) if e.abnormal_meaning else "—"}<br>
+            <b>Stop/escalate:</b> {e.stop_or_escalate_if}
+            """)
 
     if a.exam_interpretation:
         st.subheader("Exam Interpretation")
         for e in a.exam_interpretation:
-            st.markdown(f"""
-            <div class='green-box'>
-            <b>{e.entered_finding}</b><br>
+            box("green-box", f"""
+            <b>{e.finding_entered}</b><br>
             <b>Interpretation:</b> {e.interpretation}<br>
-            <b>Localization/system:</b> {e.localization_or_system_if_relevant}<br>
             <b>Supports:</b> {", ".join(e.supports) if e.supports else "—"}<br>
             <b>Argues against but does not exclude:</b> {", ".join(e.argues_against_but_does_not_exclude) if e.argues_against_but_does_not_exclude else "—"}<br>
-            <b>Next:</b> {e.next_exam_or_test_triggered}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.recommended_workup:
-        st.subheader("Recommended Workup")
-        for w in a.recommended_workup:
-            st.markdown(f"""
-            <div class='blue-box'>
-            <b>{w.priority} / {w.type}: {w.test_or_action}</b><br>
-            {w.why_needed}<br>
-            <b>What changes:</b> {w.what_result_changes}<br>
-            <b>Avoid if not indicated:</b> {w.avoid_if_not_indicated}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if getattr(a, "comprehensive_diagnostic_map", None):
-        st.subheader("Comprehensive Diagnostic Map — كل الفحوصات والصور الممكنة مع الشروط")
-        for dmo in a.comprehensive_diagnostic_map:
-            cls = "red-box" if dmo.timing == "must_do_now" else ("orange-box" if dmo.timing in ["same_day_if_available", "conditional_next_step"] else ("purple-box" if dmo.timing == "specialist_level" else "gray-box"))
-            st.markdown(f"""
-            <div class='{cls}'>
-            <b>{dmo.timing} / {dmo.category}: {dmo.test_or_image}</b><br>
-            <b>Indication in this case:</b> {dmo.indication_in_this_case}<br>
-            <b>Trigger to order:</b> {dmo.trigger_to_order}<br>
-            <b>Why not now if not indicated:</b> {dmo.why_not_now_if_not_indicated}<br>
-            <b>What result changes:</b> {dmo.what_result_would_change}<br>
-            <b>Protocol/notes:</b> {dmo.protocol_or_notes}<br>
-            <b>Danger if missed:</b> {dmo.danger_if_missed}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.action_pathway:
-        st.subheader("Action Pathway — ماذا أفعل الآن وماذا بعد النتائج؟")
-        for ap in a.action_pathway:
-            cls = "red-box" if ap.when == "if_red_flag" else ("orange-box" if ap.when in ["if_abnormal", "if_normal_but_recurrent"] else "green-box")
-            st.markdown(f"""
-            <div class='{cls}'>
-            <b>{ap.when}: {ap.step}</b><br>
-            <b>Action:</b> {ap.action}<br>
-            <b>Reason:</b> {ap.reason}<br>
-            <b>Escalation:</b> {ap.escalation}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.imaging_decision:
-        st.subheader("Imaging Decision")
-        for im in a.imaging_decision:
-            cls = "red-box" if im.imaging_needed_now == "yes" else ("orange-box" if im.imaging_needed_now in ["conditional", "unclear_need_more_data"] else "green-box")
-            st.markdown(f"""
-            <div class='{cls}'>
-            <b>{im.imaging_needed_now} / {im.urgency}: {im.imaging_type} — {im.body_region}</b><br>
-            <b>Reason:</b> {im.indication_or_reason}<br>
-            <b>Why not if no:</b> {im.why_not_needed_if_no}<br>
-            <b>Protocol:</b> {im.protocol_notes}<br>
-            <b>Statement:</b> {im.explicit_no_imaging_statement}
-            </div>
-            """, unsafe_allow_html=True)
+            <b>Next:</b> {e.next_step_triggered}
+            """)
 
     if a.differential_diagnosis:
         st.subheader("Differential Diagnosis")
         for d in a.differential_diagnosis:
-            st.markdown(f"""
-            <div class='purple-box'>
+            box("purple-box", f"""
             <b>{d.probability} / {d.urgency}: {d.diagnosis_or_category}</b><br>
-            <b>Domain:</b> {d.specialty_domain}<br>
-            <b>Confirm/exclude:</b> {d.confirm_or_exclude_step}
-            </div>
-            """, unsafe_allow_html=True)
+            <b>Domain:</b> {d.domain}<br>
+            <b>Rule in/out:</b> {d.rule_in_rule_out_step}<br>
+            <b>Evidence:</b> {d.evidence_support}
+            """)
             with st.expander("Details"):
-                st.write("Supporting:", d.supporting_features or ["—"])
-                st.write("Against:", d.features_against or ["—"])
-                st.write("Missing:", d.missing_data_needed or ["—"])
+                st.write("Why possible:", d.why_possible or ["—"])
+                st.write("Why less likely:", d.why_less_likely or ["—"])
+                st.write("Missing:", d.key_missing_data or ["—"])
 
-    if a.interpreted_results:
+    if a.recommended_workup:
+        st.subheader("Recommended Workup — الفحوصات المطلوبة كخطوة عملية")
+        for w in a.recommended_workup:
+            cls = "red-box" if w.priority == "urgent_now" else ("blue-box" if w.priority == "same_day" else "gray-box")
+            box(cls, f"""
+            <b>{w.priority} / {w.category}: {w.test_or_action}</b><br>
+            <b>Why:</b> {w.why_needed}<br>
+            <b>What changes:</b> {w.what_result_changes}<br>
+            <b>Defer/avoid:</b> {w.when_to_avoid_or_defer}
+            """)
+
+    if a.comprehensive_diagnostic_map:
+        st.subheader("Comprehensive Diagnostic Map — كل الفحوصات والصور مع الشروط")
+        for d in a.comprehensive_diagnostic_map:
+            cls = "red-box" if d.timing == "must_do_now" else ("orange-box" if d.timing in ["same_day_if_available", "conditional_next_step"] else ("purple-box" if d.timing == "specialist_level" else "gray-box"))
+            box(cls, f"""
+            <b>{d.timing} / {d.category}: {d.test_or_image}</b><br>
+            <b>Indication in this case:</b> {d.indication_in_this_case}<br>
+            <b>Trigger to order:</b> {d.trigger_to_order}<br>
+            <b>Why not now:</b> {d.why_not_now_if_not_indicated}<br>
+            <b>What result changes:</b> {d.what_result_would_change}<br>
+            <b>Protocol/notes:</b> {d.protocol_or_notes}<br>
+            <b>Danger if missed when indicated:</b> {d.danger_if_missed_when_indicated}
+            """)
+
+    if a.imaging_decisions:
+        st.subheader("Imaging Decisions")
+        for im in a.imaging_decisions:
+            cls = "red-box" if im.needed_now == "yes" else ("orange-box" if im.needed_now in ["conditional", "unclear"] else "green-box")
+            box(cls, f"""
+            <b>{im.needed_now} / {im.timing}: {im.imaging_type} — {im.body_region}</b><br>
+            <b>Reason:</b> {im.indication_or_reason}<br>
+            <b>Trigger if not now:</b> {im.trigger_if_not_now}<br>
+            <b>Protocol:</b> {im.protocol_notes}<br>
+            <b>Overtesting warning:</b> {im.overtesting_warning}
+            """)
+
+    if a.result_interpretation:
         st.subheader("Results Interpretation")
-        for x in a.interpreted_results:
-            with st.expander(f"{x.finding} — {x.confidence}"):
-                st.write("Source:", x.source)
-                st.write("Interpretation:", x.interpretation)
-                st.write("Effect:", x.effect_on_differential)
+        for r in a.result_interpretation:
+            with st.expander(f"{r.finding} — {r.confidence}"):
+                st.write("Source:", r.source)
+                st.write("Interpretation:", r.interpretation)
+                st.write("Effect:", r.effect_on_differential)
+                st.write("Next:", r.next_step)
 
     if a.medication_safety:
-        st.subheader("Medication Safety")
+        st.subheader("Medication Safety — no dosing")
         for m in a.medication_safety:
-            st.markdown(f"""
-            <div class='orange-box'>
-            <b>{m.severity}: {m.medication_or_issue}</b><br>
-            <b>Concern:</b> {m.concern}<br>
-            <b>Check:</b> {", ".join(m.check_before_treatment) if m.check_before_treatment else "—"}<br>
-            <b>Avoid/caution:</b> {m.avoid_or_caution}<br>
-            <b>Safer:</b> {m.safer_consideration}
-            </div>
-            """, unsafe_allow_html=True)
+            box("orange-box", f"""
+            <b>{m.medication_or_class}</b><br>
+            <b>Issue:</b> {m.issue}<br>
+            <b>Checks:</b> {", ".join(m.safety_checks_before_use) if m.safety_checks_before_use else "—"}<br>
+            <b>Avoid/caution:</b> {", ".join(m.avoid_or_use_caution_if) if m.avoid_or_use_caution_if else "—"}<br>
+            <b>Monitoring:</b> {m.monitoring_needed}<br>
+            <b>Note:</b> {m.non_dosing_note}
+            """)
 
-    if a.treatment_support_after_results:
-        st.subheader("Treatment Support — no dosing")
-        for t in a.treatment_support_after_results:
-            st.markdown(f"""
-            <div class='orange-box'>
-            <b>Goal:</b> {t.clinical_goal}<br>
-            <b>Option/class:</b> {t.possible_class_or_option}<br>
-            <b>Consider when:</b> {t.when_to_consider}<br>
-            <b>Must check:</b> {", ".join(t.must_check_before) if t.must_check_before else "—"}<br>
-            <b>Avoid if:</b> {", ".join(t.avoid_if) if t.avoid_if else "—"}<br>
-            <b>Monitoring:</b> {t.monitoring}<br>
-            <b>Note:</b> {t.note_no_dosing}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.follow_up_thresholds:
-        st.subheader("Follow-up / Return Precautions")
-        for f in a.follow_up_thresholds:
-            cls = "red-box" if f.timeframe == "immediate_ER" else ("orange-box" if f.timeframe in ["same_day", "24_48h"] else "green-box")
-            st.markdown(f"""
-            <div class='{cls}'>
-            <b>{f.timeframe}</b><br>
-            <b>Situation:</b> {f.situation}<br>
-            <b>Action:</b> {f.action}
-            </div>
-            """, unsafe_allow_html=True)
-
-    if a.trusted_reference_anchors:
-        st.subheader("Trusted Reference Anchors")
-        for ref in a.trusted_reference_anchors:
-            st.info(f"**{ref.source_or_framework}:** {ref.principle_used} → {ref.how_it_applies_here}")
-
-    if a.evidence_verification:
-        st.subheader("Evidence Verification — تدقيق المرجع قبل النتيجة")
-        for ev in a.evidence_verification:
-            box = "green-box" if ev.verification_status == "verified_from_uploaded_material" else ("orange-box" if ev.verification_status in ["framework_based_not_live_checked", "not_live_verified"] else "red-box")
-            st.markdown(f"""
-            <div class='{box}'>
-            <b>Clinical question:</b> {ev.clinical_question}<br>
-            <b>Recommendation/claim:</b> {ev.recommendation_or_claim}<br>
-            <b>Source type:</b> {ev.evidence_source_type}<br>
-            <b>Reference:</b> {ev.reference_name_or_note}<br>
-            <b>Source title:</b> {ev.source_title}<br>
-            <b>Organization:</b> {ev.source_organization}<br>
-            <b>Year/date:</b> {ev.source_year_or_date}<br>
-            <b>URL/citation:</b> {ev.source_url_or_citation}<br>
-            <b>Evidence point:</b> {ev.exact_evidence_point}<br>
-            <b>Evidence strength:</b> {ev.evidence_strength}<br>
-            <b>Verification status:</b> {ev.verification_status}<br>
-            <b>Impact:</b> {ev.how_it_changes_recommendation}<br>
-            <b>Caution:</b> {ev.caution}
-            </div>
-            """, unsafe_allow_html=True)
+    if a.action_pathway:
+        st.subheader("Action Pathway — ماذا أفعل الآن وماذا بعد النتائج؟")
+        for ap in a.action_pathway:
+            cls = "red-box" if ap.when == "if_red_flag" else ("orange-box" if ap.when in ["if_abnormal", "if_normal_but_recurrent_or_persistent"] else "green-box")
+            box(cls, f"""
+            <b>{ap.when}: {ap.step}</b><br>
+            <b>Action:</b> {ap.action}<br>
+            <b>Reason:</b> {ap.reason}<br>
+            <b>Escalation:</b> {ap.escalation_threshold}
+            """)
 
     st.subheader("Quality Control")
     qc = a.quality_control
-    st.markdown(f"""
-    <div class='gray-box'>
-    <b>Completeness:</b> {qc.completeness_level}<br>
+    box("gray-box", f"""
+    <b>Completeness:</b> {qc.completeness}<br>
     <b>Overtesting:</b> {qc.overtesting_check}<br>
     <b>Undertesting:</b> {qc.undertesting_check}<br>
+    <b>Evidence:</b> {qc.evidence_check}<br>
     <b>Medication safety:</b> {qc.medication_safety_check}<br>
-    <b>General medicine mimics:</b> {qc.general_medicine_mimics_check}<br>
-    <b>Clinician override:</b> {qc.clinician_override_needed_when}
-    </div>
-    """, unsafe_allow_html=True)
+    <b>Override:</b> {qc.clinician_override_needed_when}
+    """)
 
-    st.subheader("Strict Quality Check")
-    st.write(a.strict_quality_check)
     st.subheader("What to do now")
     st.write(a.what_to_do_now)
     st.subheader("What to enter next")
@@ -1512,6 +866,7 @@ def render(a):
     st.write("**O:**", a.soap_note.objective)
     st.write("**A:**", a.soap_note.assessment)
     st.write("**P:**", a.soap_note.plan)
+
     if a.limitations:
         st.subheader("Limitations")
         for l in a.limitations:
@@ -1523,89 +878,62 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.6")
-    model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
-    auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
-    evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
-    evidence_source_scope = st.selectbox("Evidence source scope", ["Authoritative medical domains only", "Broad web search"], index=0, help="In v4.7.1 this is enforced by prompt, not by API filters, to avoid model compatibility errors.")
-    strictness = st.selectbox("Safety strictness", ["Very strict", "Strict", "Balanced"], index=0)
-    focus = st.selectbox("Neurology focus", [
-        "General Neurology",
-        "Headache / Migraine / Raised ICP / CSF leak",
-        "Seizure / Syncope",
-        "Stroke / TIA / Weakness",
-        "Dizziness / Vertigo",
-        "Neuropathy / Numbness",
-        "Myelopathy / Radiculopathy / Neck-back pain",
-        "Movement disorder",
-        "Cognitive / psychiatric-neuro overlap"
-    ])
-    body_system_focus = st.selectbox("General medicine focus", [
-        "Auto-route all relevant systems",
-        "General Medicine",
-        "Emergency Medicine",
-        "Cardiology",
-        "Pulmonology",
-        "Endocrinology/Metabolic",
-        "Infectious Disease",
-        "Rheumatology",
-        "Nephrology/Urology",
-        "Gastroenterology/Hepatology",
-        "Hematology",
-        "ENT",
-        "Psychiatry",
-        "Orthopedics/MSK",
-        "Dermatology",
-        "Pediatrics",
-        "Gynecology/Pregnancy"
-    ])
+    st.title("🧠 GPT-5 Strong v5.1")
+    model_preset = st.selectbox(
+        "Model power preset",
+        ["GPT-5.5 strongest", "GPT-5.4 strong", "GPT-5.4 mini balanced", "Manual"],
+        index=0,
+        help="If your API account does not have access to the selected GPT-5 model, the app will automatically try fallbacks."
+    )
+    manual_model = st.text_input("Manual clinical model", value=DEFAULT_MODEL)
+    model = selected_model_from_preset(model_preset, manual_model)
+    st.success(f"Clinical model selected: {model}")
+
+    evidence_preset = st.selectbox(
+        "Evidence search model preset",
+        ["GPT-5.4 mini balanced", "GPT-5.4 strong", "GPT-5.5 strongest", "Manual"],
+        index=0
+    )
+    manual_evidence_model = st.text_input("Manual evidence model", value="gpt-5.4-mini")
+    evidence_model = selected_model_from_preset(evidence_preset, manual_evidence_model)
+    st.info(f"Evidence model selected: {evidence_model}")
+
+    depth = st.selectbox("Reasoning depth", ["Level 5 — Deep systematic", "Level 4 — Comprehensive", "Level 3 — Balanced"], index=0)
+    auto_evidence = st.checkbox("Automatic Evidence Web Search", value=True)
+    source_mode = st.selectbox("Evidence mode", ["Open authoritative web + uploaded references", "Uploaded/entered references only", "Clinical reasoning only"], index=0)
     st.warning("Clinical decision support only. القرار النهائي للطبيب.")
-    st.caption("استخدم Patient ID بدل اسم المريض.")
+    st.caption("لا تستخدم اسم المريض الحقيقي. استخدم Patient ID.")
 
 
 # =========================================================
-# Main UI
+# UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.6")
-st.caption("الجديد: v4.7.4 — خريطة شاملة للفحوصات والصور + فحص سريري أقوى + Evidence أدق.")
-
-top = st.columns(10)
-top[0].metric("1", "Intake")
-top[1].metric("2", "Neuro")
-top[2].metric("3", "General")
-top[3].metric("4", "Q Before")
-top[4].metric("5", "Exam Plan")
-top[5].metric("6", "Findings")
-top[6].metric("7", "Q After")
-top[7].metric("8", "Dx")
-top[8].metric("9", "Results")
-top[9].metric("10", "Evidence")
+st.title("MedAssist Level-5 AutoEvidence GPT-5 Strong v5.1")
+st.caption("محرك Level-5 عام باستخدام GPT-5 Strong افتراضيًا: يقرأ أي حالة، يبحث، يفكر بشكل منظم، ثم يعطي أسئلة، فحص سريري، differential، خريطة فحوصات وصور، وaction pathway.")
 
 tabs = st.tabs([
     "① Intake",
-    "② Neuro Screen",
-    "③ General Medicine Screen",
-    "④ Evidence / Guidelines",
-    "⑤ Questions Before Exam",
-    "⑥ Exam Protocol: كيف أفحص؟",
-    "⑦ Enter Exam Findings",
-    "⑧ Questions After Exam",
-    "⑨ Dx & Workup",
-    "⑩ Results / Imaging",
-    "⑪ Full Review / Medication",
-    "⑫ Report / Search"
+    "② System Screens",
+    "③ Evidence / References",
+    "④ Exam Findings",
+    "⑤ Results / Reports",
+    "⑥ Questions",
+    "⑦ Exam Protocol",
+    "⑧ Dx + Diagnostic Map",
+    "⑨ Results Review",
+    "⑩ Full Level-5 Review",
+    "⑪ Report / Search"
 ])
 
 uploaded_files = []
 
 with tabs[0]:
     st.header("① Intake")
-    clinical_search = st.text_input("🔎 Clinical search / سؤال سريري سريع", placeholder="مثال: ما الأسئلة قبل الفحص وبعد الفحص لهذه الحالة؟")
-
+    clinical_question = st.text_area("Clinical question / هدف الطبيب", height=70, placeholder="مثال: ما التشخيصات المحتملة؟ ما الفحوصات والصور المطلوبة؟")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        patient_id = st.text_input("Patient ID", value="Patient-001")
+        patient_id = st.text_input("Patient ID", value="patient-001")
     with c2:
         age = st.number_input("Age", 0, 120, 30)
     with c3:
@@ -1614,190 +942,145 @@ with tabs[0]:
         pregnancy = st.selectbox("Pregnancy/Postpartum", ["Not relevant/Unknown", "Not pregnant", "Pregnant", "Postpartum", "Possible"])
 
     setting = st.selectbox("Setting", ["Clinic", "ER", "Ward", "Telemedicine", "Other"])
-    complaint = st.text_area("Chief complaint / الشكوى الأساسية", height=90)
-    onset = st.text_area("Onset/timing / البداية والتوقيت", height=80)
-    course = st.text_area("Course/progression / التطور", height=80)
-    quality = st.text_area("Quality/sensation / طبيعة الإحساس", height=80)
-    severity = st.text_area("Severity/function impact / الشدة والتأثير", height=80)
-    associated = st.text_area("Associated symptoms / ROS / أعراض مرافقة", height=120)
-
-    st.subheader("Medication safety")
-    meds = st.text_area("Current medications", height=90)
-    allergies = st.text_area("Allergies", height=70)
-    safety = st.text_area("Renal/liver/pregnancy/bleeding risks", height=70)
+    complaint = st.text_area("Chief complaint", height=80)
+    onset = st.text_area("Onset/timing", height=70)
+    course = st.text_area("Course/progression", height=70)
+    quality = st.text_area("Quality/sensation", height=70)
+    severity = st.text_area("Severity/function impact", height=70)
+    associated = st.text_area("Associated symptoms / ROS", height=120)
+    pmh = st.text_area("Past medical history", height=70)
+    social = st.text_area("Family/social/substance history", height=70)
+    meds = st.text_area("Current medications", height=70)
+    allergies = st.text_area("Allergies", height=50)
+    safety = st.text_area("Medication safety risks: renal/liver/bleeding/pregnancy/QT/sedation", height=70)
     vitals = st.text_area("Vitals", height=80)
-    doctor_question = st.text_area("Additional doctor question", height=80)
 
 with tabs[1]:
-    st.header("② Neuro Screen")
-    focal = st.text_area("Focal neuro: weakness/numbness/speech/vision/gait", height=80)
-    headache_icp_csf = st.text_area("Headache / raised ICP / CSF leak features", height=100)
-    seizure_syncope = st.text_area("Seizure/syncope features", height=90)
-    vertigo = st.text_area("Dizziness/vertigo features", height=90)
-    weakness_neuropathy = st.text_area("Numbness/weakness/back-neck/radicular symptoms", height=90)
-    previous_neuro = st.text_area("Previous neuro episodes/history", height=80)
+    st.header("② System Screens")
+    neuro_screen = st.text_area("Neurology screen", height=90)
+    cardiac_screen = st.text_area("Cardiac/vascular screen", height=90)
+    resp_screen = st.text_area("Respiratory screen", height=80)
+    infection_screen = st.text_area("Infection/systemic screen", height=80)
+    endo_screen = st.text_area("Endocrine/metabolic screen", height=80)
+    gi_renal_screen = st.text_area("GI/renal/hepatic screen", height=80)
+    rheum_msk_skin_screen = st.text_area("Rheum/MSK/skin screen", height=80)
+    psych_sleep_screen = st.text_area("Psychiatric/sleep screen", height=80)
+    risk_screen = st.text_area("Trauma/toxicology/other risks", height=80)
 
 with tabs[2]:
-    st.header("③ General Medicine Screen")
-    cardiac = st.text_area("Cardiac symptoms/risk", height=80)
-    resp = st.text_area("Respiratory symptoms/risk", height=80)
-    infection = st.text_area("Infection/systemic symptoms", height=80)
-    endo = st.text_area("Endocrine/metabolic symptoms/risk", height=80)
-    gi_renal = st.text_area("GI/renal/hepatic symptoms", height=80)
-    rheum_msk_skin = st.text_area("Rheum/MSK/skin symptoms", height=80)
-    psych_sleep_substance = st.text_area("Psychiatric/sleep/substance symptoms", height=80)
-    risk_red = st.text_area("Trauma/cancer/immunosuppression/other risks", height=80)
+    st.header("③ Evidence / References")
+    reference_notes = st.text_area("Doctor-entered guideline notes / reference excerpts", height=160)
+    st.info("في v5.0 التطبيق لا يعتمد على حالة واحدة. إذا كان البحث الأوتوماتيكي مفعّلًا سيبحث حسب الحالة المدخلة.")
 
 with tabs[3]:
-    st.header("④ Evidence / Guidelines")
-    st.markdown("<div class='workflow-card'>ضع هنا مقتطفات من المراجع أو guideline notes. إذا لم تضع مرجعًا، التطبيق سيقول إن التوصية غير مفحوصة live ولا يدّعي أنه بحث في المراجع.</div>", unsafe_allow_html=True)
-    reference_notes = st.text_area(
-        "Reference notes / guideline excerpts",
-        height=180,
-        placeholder="مثال: NICE headache guideline excerpt, AAN seizure guidance, AHA syncope/stroke principle, local hospital protocol..."
-    )
-    st.info("إذا كان Automatic Evidence Web Search مفعّلًا، سيبحث التطبيق تلقائيًا في المصادر الطبية المفتوحة قبل التحليل. يمكنك أيضًا رفع PDF أو وضع guideline notes هنا.")
+    st.header("④ Exam Findings")
+    general_exam = st.text_area("General/vitals exam", height=80)
+    neuro_exam = st.text_area("Neurologic exam", height=100)
+    cardio_exam = st.text_area("Cardiovascular exam", height=90)
+    resp_exam = st.text_area("Respiratory exam", height=80)
+    abd_exam = st.text_area("Abdominal/renal exam", height=80)
+    ent_msk_skin_exam = st.text_area("ENT/MSK/skin/rheum exam", height=90)
+    psych_exam = st.text_area("Psych/cognitive exam", height=80)
+    other_exam = st.text_area("Other exam", height=70)
 
-with tabs[6]:
-    st.header("⑦ Enter Exam Findings")
-    st.markdown("<div class='workflow-card'>بعد أن يعطيك التطبيق طريقة الفحص في المرحلة ⑤، اكتب هنا ماذا وجدت أنت بالفحص.</div>", unsafe_allow_html=True)
-    general_exam = st.text_area("General appearance/vitals exam", height=80)
-    neuro_exam = st.text_area("Neurologic exam", height=130)
-    cardio_resp_exam = st.text_area("Cardiovascular/respiratory exam", height=100)
-    abd_renal_exam = st.text_area("Abdominal/renal exam", height=80)
-    ent_msk_skin_exam = st.text_area("ENT/MSK/skin/rheum exam", height=100)
-    psych_exam = st.text_area("Psychiatric/cognitive exam", height=80)
-    other_exam = st.text_area("Other exam findings", height=80)
-
-with tabs[9]:
-    st.header("⑩ Results / Imaging")
+with tabs[4]:
+    st.header("⑤ Results / Reports")
     labs = st.text_area("Labs", height=120)
-    imaging = st.text_area("Imaging report text: MRI/CT/X-ray/Ultrasound", height=150)
-    other = st.text_area("ECG/EEG/EMG/Echo/Other report", height=120)
-    uploaded_files = st.file_uploader("Upload PDF/images/reports", type=["pdf", "png", "jpg", "jpeg", "webp", "txt", "csv", "xlsx", "docx"], accept_multiple_files=True)
-    if uploaded_files:
-        st.success(f"Uploaded {len(uploaded_files)} file(s)")
-
-automatic_evidence_research = st.session_state.get('automatic_evidence_research', '')
+    imaging = st.text_area("Imaging reports", height=140)
+    other_results = st.text_area("ECG/EEG/EMG/Echo/Other", height=120)
+    uploaded_files = st.file_uploader("Upload reports/images/PDFs", type=["pdf", "png", "jpg", "jpeg", "webp", "txt", "csv", "xlsx", "docx"], accept_multiple_files=True)
 
 def context_now():
     return make_context({
-        "clinical_search": clinical_search, "reference_notes": reference_notes, "automatic_evidence_research": automatic_evidence_research,
-        "patient_id": patient_id, "age": age, "sex": sex, "pregnancy": pregnancy,
-        "setting": setting, "complaint": complaint, "onset": onset, "course": course,
-        "quality": quality, "severity": severity, "associated": associated,
-        "focal": focal, "headache_icp_csf": headache_icp_csf, "seizure_syncope": seizure_syncope,
-        "vertigo": vertigo, "weakness_neuropathy": weakness_neuropathy, "previous_neuro": previous_neuro,
-        "cardiac": cardiac, "resp": resp, "infection": infection, "endo": endo,
-        "gi_renal": gi_renal, "rheum_msk_skin": rheum_msk_skin,
-        "psych_sleep_substance": psych_sleep_substance, "risk_red": risk_red,
+        "patient_id": patient_id, "age": age, "sex": sex, "pregnancy": pregnancy, "setting": setting,
+        "clinical_question": clinical_question, "complaint": complaint, "onset": onset, "course": course,
+        "quality": quality, "severity": severity, "associated": associated, "pmh": pmh, "social": social,
         "meds": meds, "allergies": allergies, "safety": safety, "vitals": vitals,
-        "general_exam": general_exam, "neuro_exam": neuro_exam, "cardio_resp_exam": cardio_resp_exam,
-        "abd_renal_exam": abd_renal_exam, "ent_msk_skin_exam": ent_msk_skin_exam,
+        "neuro_screen": neuro_screen, "cardiac_screen": cardiac_screen, "resp_screen": resp_screen,
+        "infection_screen": infection_screen, "endo_screen": endo_screen, "gi_renal_screen": gi_renal_screen,
+        "rheum_msk_skin_screen": rheum_msk_skin_screen, "psych_sleep_screen": psych_sleep_screen, "risk_screen": risk_screen,
+        "general_exam": general_exam, "neuro_exam": neuro_exam, "cardio_exam": cardio_exam,
+        "resp_exam": resp_exam, "abd_exam": abd_exam, "ent_msk_skin_exam": ent_msk_skin_exam,
         "psych_exam": psych_exam, "other_exam": other_exam,
-        "labs": labs, "imaging": imaging, "other": other, "doctor_question": doctor_question,
+        "labs": labs, "imaging": imaging, "other_results": other_results,
+        "reference_notes": reference_notes,
+        "evidence_text": st.session_state.get("evidence_text", "")
     })
 
 def analyze_button(label, stage):
     if st.button(label, type="primary", use_container_width=True):
-        with st.spinner("AI يحلل..."):
+        with st.spinner("Level-5 analysis running..."):
             try:
-                # First build context without fresh evidence
-                ctx_without_fresh_evidence = context_now()
-
-                # Automatic web evidence search before the clinical answer
-                if auto_evidence_search:
-                    with st.spinner("يبحث أوتوماتيكيًا في المصادر الطبية الموثوقة..."):
-                        fresh_evidence = run_automatic_evidence_search(
-                            stage=stage,
-                            focus=focus,
-                            body_system_focus=body_system_focus,
-                            context=ctx_without_fresh_evidence,
-                            evidence_model=evidence_model,
-                            source_scope=evidence_source_scope,
-                            force_search=True,
-                        )
-                    st.session_state["automatic_evidence_research"] = fresh_evidence
+                base_context = context_now()
+                if auto_evidence and source_mode == "Open authoritative web + uploaded references":
+                    with st.spinner("Automatic evidence search..."):
+                        st.session_state["evidence_text"] = run_evidence_search(stage, base_context, depth, evidence_model)
+                elif source_mode == "Uploaded/entered references only":
+                    st.session_state["evidence_text"] = "Automatic web search disabled. Use doctor-entered/uploaded references only."
                 else:
-                    st.session_state["automatic_evidence_research"] = "Automatic evidence web search disabled by clinician."
+                    st.session_state["evidence_text"] = "Evidence web search disabled. Clinical reasoning only; mark evidence as not live verified."
 
-                # Rebuild context including evidence text
                 ctx = context_now()
-                a = run_ai(stage, focus, body_system_focus, strictness, ctx, uploaded_files, model)
-                a = apply_deterministic_guardrails(a, ctx)
+                a = run_ai(stage, ctx, uploaded_files, model, depth, source_mode)
+                a = generic_cleanup(a)
                 st.session_state[f"analysis_{stage}"] = a
                 st.session_state["last_analysis"] = a
                 st.session_state["last_context"] = ctx
                 st.session_state["last_md"] = save_report(ctx, a)
-                st.success("تم التحليل")
+                st.success("Done")
             except Exception as e:
                 st.error("حدث خطأ أثناء التحليل")
                 st.exception(e)
 
-with tabs[4]:
-    st.header("⑤ Questions Before Exam")
-    st.markdown("<div class='workflow-card'>أسئلة حسب الحالة قبل الفحص السريري، مع red flags وأمان دوائي.</div>", unsafe_allow_html=True)
-    analyze_button("Generate questions BEFORE exam", "questions")
+with tabs[5]:
+    st.header("⑥ Questions")
+    analyze_button("Generate Level-5 questions", "questions")
     if "analysis_questions" in st.session_state:
         render(st.session_state["analysis_questions"])
 
-with tabs[5]:
-    st.header("⑥ Exam Protocol: كيف أفحص؟")
-    analyze_button("Generate detailed clinical exam protocol", "exam_protocol")
+with tabs[6]:
+    st.header("⑦ Exam Protocol")
+    analyze_button("Generate detailed exam protocol", "exam_protocol")
     if "analysis_exam_protocol" in st.session_state:
         render(st.session_state["analysis_exam_protocol"])
 
 with tabs[7]:
-    st.header("⑧ Questions After Exam")
-    st.markdown("<div class='workflow-card'>بعد إدخال نتائج الفحص، يعطيك أسئلة جديدة مبنية على الموجودات.</div>", unsafe_allow_html=True)
-    analyze_button("Interpret exam + generate questions AFTER exam", "exam_interpretation")
-    if "analysis_exam_interpretation" in st.session_state:
-        render(st.session_state["analysis_exam_interpretation"])
+    st.header("⑧ Dx + Diagnostic Map")
+    analyze_button("Analyze differential + full diagnostic map", "dx_workup")
+    if "analysis_dx_workup" in st.session_state:
+        render(st.session_state["analysis_dx_workup"])
 
 with tabs[8]:
-    st.header("⑨ Dx & Workup")
-    analyze_button("Analyze Dx & Workup after exam", "preliminary")
-    if "analysis_preliminary" in st.session_state:
-        render(st.session_state["analysis_preliminary"])
-
-with tabs[10]:
-    st.header("⑪ Full Review / Medication")
-    analyze_button("Analyze results + questions AFTER labs/imaging + medication safety", "results")
+    st.header("⑨ Results Review")
+    analyze_button("Interpret results and update plan", "results")
     if "analysis_results" in st.session_state:
         render(st.session_state["analysis_results"])
 
-    st.divider()
-    analyze_button("Full Neuro-General Guard Review", "full_review")
+with tabs[9]:
+    st.header("⑩ Full Level-5 Review")
+    analyze_button("Full Level-5 review", "full_review")
     if "analysis_full_review" in st.session_state:
         render(st.session_state["analysis_full_review"])
 
-with tabs[11]:
-    st.header("⑫ Report / Search")
-    search_history = st.text_input("🔎 Search saved reports", placeholder="headache, seizure, chest pain, MRI, patient id...")
-    reports = sorted(DATA_DIR.glob("neuro_general_guard_*.md"), reverse=True)
-
-    if st.session_state.get("automatic_evidence_research"):
-        with st.expander("Automatic Evidence Web Search — raw evidence notes"):
-            st.text(st.session_state.get("automatic_evidence_research", "")[:20000])
+with tabs[10]:
+    st.header("⑪ Report / Search")
+    if st.session_state.get("evidence_text"):
+        with st.expander("Raw automatic evidence research"):
+            st.text(st.session_state["evidence_text"][:25000])
 
     if "last_analysis" in st.session_state:
         md = report_markdown(st.session_state["last_analysis"])
-        st.download_button("Download Markdown report", data=md.encode("utf-8"), file_name=f"neuro_general_guard_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", mime="text/markdown")
-        st.download_button("Download JSON", data=st.session_state["last_analysis"].model_dump_json(indent=2).encode("utf-8"), file_name=f"neuro_general_guard_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", mime="application/json")
+        st.download_button("Download Markdown report", data=md.encode("utf-8"), file_name=f"level5_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", mime="text/markdown")
+        st.download_button("Download JSON", data=st.session_state["last_analysis"].model_dump_json(indent=2).encode("utf-8"), file_name=f"level5_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", mime="application/json")
 
-    if reports:
-        shown = 0
-        for r in reports[:50]:
-            txt = r.read_text(encoding="utf-8")
-            if search_history and search_history.lower() not in txt.lower() and search_history.lower() not in r.name.lower():
-                continue
-            shown += 1
-            with st.expander(r.name):
-                st.text(txt[:7000])
-        if shown == 0:
-            st.info("لا توجد نتائج مطابقة للبحث.")
-    else:
-        st.info("لا توجد تقارير محفوظة بعد.")
+    search = st.text_input("Search saved reports")
+    reports = sorted(DATA_DIR.glob("level5_report_*.md"), reverse=True)
+    for r in reports[:50]:
+        txt = r.read_text(encoding="utf-8")
+        if search and search.lower() not in txt.lower() and search.lower() not in r.name.lower():
+            continue
+        with st.expander(r.name):
+            st.text(txt[:7000])
 
-    with st.expander("Preview full context sent to AI"):
+    with st.expander("Preview context sent to AI"):
         st.text(context_now())
