@@ -1,54 +1,29 @@
-# MedAssist Neuro-General AutoEvidence Guard v4.7.4
+# MedAssist Neuro-General AutoEvidence Guard v4.7.5
 
-نسخة قوية جدًا بعد اختبار v4.7.3.
+Patch بعد اختبار v4.7.4.
 
-## لماذا أضفنا هذه النسخة؟
-النسخ السابقة كانت تمنع overtesting، لذلك في حالة الدوخة مع الخفقان لم تكن تعرض كل الصور والفحوصات الممكنة.
-الآن أضفنا خريطة كاملة: ليس فقط ماذا تطلب الآن، بل ماذا يمكن أن تطلب لاحقًا ومتى يصبح مبررًا.
+## ما الجديد؟
+1. Diagnostic Map مضمون أكثر:
+   - إذا لم يرجع النموذج الخريطة، تظهر رسالة تحذير.
+   - في palpitations + near-syncope، الكود يضيف core diagnostic map تلقائيًا إذا كانت فارغة.
 
-## الجديد
-1. Comprehensive Diagnostic Map:
-   - must_do_now
-   - same_day_if_available
-   - conditional_next_step
-   - specialist_level
-   - not_indicated_now
+2. Recommended Workup أقوى:
+   - يضيف BMP/electrolytes/renal function including Mg/Ca إذا كانت الحالة palpitations + near-syncope.
 
-2. تعرض كل الفحوصات والصور الممكنة مع شروطها، مثل:
-   - ECG
-   - Orthostatic BP/HR
-   - Capillary glucose
-   - BMP/electrolytes/renal/Mg/Ca
-   - CBC
-   - TSH
-   - Troponin/ACS pathway
-   - D-dimer/PE workup
-   - Holter/event monitor
-   - Echocardiography
-   - CT brain
-   - MRI brain ± MRA/MRV
-   - CTA/MRA head-neck
-   - EEG
+3. أسئلة ما قبل الفحص:
+   - إزالة التكرار الذكي للأسئلة المتشابهة مثل complete syncope/exertional syncope/chest pain/dehydration/glucose.
 
-3. فحص سريري أقوى:
-   - لا يقول فقط visually
-   - يطلب palpate radial pulse
-   - auscultate heart
-   - orthostatic BP/HR
-   - focused neuro screen
-   - signs of dehydration/anemia/respiratory distress
+4. Differential cleanup:
+   - Neurocardiogenic/Vasovagal syncope يصبح General Medicine / Cardiology بدل Neurology.
+   - لا يرفع vasovagal فوق cardiac arrhythmia في حالة palpitations + near-syncope.
 
-4. Evidence أقوى:
-   - لا يقبل رابط عام كمصدر قوي
-   - إذا المصدر عام أو غير محدد يضع needs_manual_reference_check
-
-## مهم
-هذه خريطة فحوصات وليست أمرًا بطلب كل شيء. القرار النهائي للطبيب.
-
-## Streamlit Secrets
-```toml
-OPENAI_API_KEY = "sk-..."
-```
+5. يحافظ على:
+   - Cardiology guardrail.
+   - TIA low/cannot_rank بدون focal signs.
+   - No routine brain imaging without neuro red flags.
+   - AutoEvidence web search.
+   - Comprehensive Diagnostic Map:
+     must_do_now / same_day_if_available / conditional_next_step / specialist_level / not_indicated_now.
 
 ## Main file
 app.py

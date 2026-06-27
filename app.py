@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.4
+# MedAssist Neuro-General AutoEvidence Guard v4.7.5
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.4",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.5",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -374,7 +374,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.4.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.5.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -713,9 +713,33 @@ def _dedupe_by_key(items, key_fn):
     return out
 
 
+def _question_key(txt):
+    t = _lc(txt)
+    if "complete syncope" in t or "loss of consciousness" in t or "إغماء كامل" in t:
+        return "complete_syncope"
+    if "exertion" in t or "supine" in t or "جهد" in t or "استلقاء" in t:
+        return "exertional_supine"
+    if "chest pain" in t or "severe shortness" in t or "dyspnea" in t or "diaphoresis" in t:
+        return "chest_dyspnea_acs_pe"
+    if "start and stop" in t or "sudden" in t and "palp" in t:
+        return "palpitation_pattern"
+    if "sudden cardiac death" in t or "structural heart" in t:
+        return "family_structural"
+    if "caffeine" in t or "stimulant" in t or "decongestant" in t or "qt-risk" in t:
+        return "substance_meds"
+    if "vomiting" in t or "diarrhea" in t or "dehydration" in t or "poor intake" in t:
+        return "dehydration"
+    if "bleeding" in t or "melena" in t or "anemia" in t or "pallor" in t:
+        return "anemia_bleeding"
+    if "glucose" in t or "diabetes" in t or "fasting" in t:
+        return "glucose"
+    return "".join(ch for ch in t[:45] if ch.isalnum() or ch == " ")
+
+
 def _append_question_if_missing(question_list, question, stage, domain, why, impact, priority="must_ask_now"):
-    q_text = question.lower()
-    if not any(q_text[:28] in _lc(q.question) or _lc(q.question)[:28] in q_text for q in question_list):
+    key = _question_key(question)
+    existing = {_question_key(q.question) for q in question_list}
+    if key not in existing:
         question_list.append(StageQuestion(
             question=question,
             stage=stage,
@@ -892,6 +916,8 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
         # Workup guardrails.
         _append_workup_if_missing(a, "Capillary blood glucose", "bedside_test", "urgent",
                                   "Hypoglycemia can cause dizziness, palpitations, and presyncope.", "Low glucose requires immediate correction.", "Do not delay if patient is symptomatic.")
+        _append_workup_if_missing(a, "BMP/electrolytes/renal function including Mg/Ca if available", "lab", "important",
+                                  "Electrolyte, magnesium/calcium, renal, and volume-related abnormalities can trigger palpitations or presyncope.", "Abnormal results guide correction, medication safety, and arrhythmia risk assessment.", "Do not delay ECG/urgent stabilization while waiting for labs.")
         _append_workup_if_missing(a, "CBC", "lab", "important",
                                   "Screens for anemia/bleeding/infection when dizziness with tachycardia is present.", "Anemia or leukocytosis redirects evaluation.", "May be less urgent if no anemia/bleeding/systemic clues and patient is stable.")
         _append_workup_if_missing(a, "TSH if recurrent palpitations or unexplained persistent tachycardia", "lab", "routine",
@@ -994,6 +1020,23 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
                 ev.verification_status = "needs_manual_reference_check"
                 ev.caution = "Generic organization page or nonspecific source title; verify the exact guideline/scientific statement before treating as strong evidence."
 
+    # Differential domain cleanup.
+    for d in a.differential_diagnosis:
+        name = _lc(d.diagnosis_or_category)
+        if "neurocardiogenic" in name or "vasovagal" in name:
+            d.specialty_domain = "General Medicine / Cardiology"
+            if d.probability == "high" and palpitations and presyncope:
+                d.probability = "medium"
+
+    # If diagnostic map is unexpectedly empty in a palpitations + presyncope case, force core map again.
+    if palpitations and presyncope and len(a.comprehensive_diagnostic_map) == 0:
+        _append_diag_option_if_missing(a, "12-lead ECG", "cardiac", "must_do_now",
+            "Palpitations with near-syncope.", "Any presyncope/syncope with palpitations.", "Indicated now.", "Detects arrhythmia/conduction/QT/ischemic patterns.", "Obtain during symptoms if possible.", "Dangerous arrhythmia may be missed.")
+        _append_diag_option_if_missing(a, "Orthostatic BP/HR", "bedside", "must_do_now",
+            "Symptoms worsen with standing.", "Posture-related presyncope.", "Indicated now.", "Detects orthostatic hypotension or abnormal HR response.", "Fall precautions.", "Volume/autonomic cause may be missed.")
+        _append_diag_option_if_missing(a, "CT/MRI brain", "imaging_brain", "not_indicated_now",
+            "No focal neuro signs now.", "Order only if focal deficit, seizure, severe new headache, trauma, altered mental status, ataxia/diplopia, raised ICP signs.", "Not indicated now; cardiac/orthostatic pattern.", "Detects intracranial emergency when triggered.", "Use emergency neuro protocol if triggered.", "Neuro emergencies matter when red flags appear.")
+
     # Final dedupe again.
     a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
     a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
@@ -1008,7 +1051,7 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.4 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.5 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -1307,7 +1350,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.4")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.5")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
@@ -1351,7 +1394,7 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.4")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.5")
 st.caption("الجديد: v4.7.4 — خريطة شاملة للفحوصات والصور + فحص سريري أقوى + Evidence أدق.")
 
 top = st.columns(10)
