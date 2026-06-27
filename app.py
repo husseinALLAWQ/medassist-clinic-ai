@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7.5
+# MedAssist Neuro-General AutoEvidence Guard v4.7.6
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.5",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.6",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -197,6 +197,14 @@ class DiagnosticOption(BaseModel):
     danger_if_missed: str
 
 
+class ActionPathwayItem(BaseModel):
+    step: str
+    when: Literal["now", "if_abnormal", "if_normal_but_recurrent", "if_red_flag", "followup"]
+    action: str
+    reason: str
+    escalation: str
+
+
 class ImagingDecision(BaseModel):
     imaging_needed_now: Literal["yes", "no", "conditional", "unclear_need_more_data"]
     imaging_type: str
@@ -292,6 +300,7 @@ class GuardAnalysis(BaseModel):
     exam_interpretation: List[ExamInterpretationItem] = Field(default_factory=list)
     recommended_workup: List[WorkupItem] = Field(default_factory=list)
     comprehensive_diagnostic_map: List[DiagnosticOption] = Field(default_factory=list)
+    action_pathway: List[ActionPathwayItem] = Field(default_factory=list)
     imaging_decision: List[ImagingDecision] = Field(default_factory=list)
     differential_diagnosis: List[DifferentialItem] = Field(default_factory=list)
     interpreted_results: List[ResultInterpretation] = Field(default_factory=list)
@@ -348,6 +357,7 @@ E) Near-syncope/palpitations HARD RULES:
   persistent tachyarrhythmia, focal neurologic deficit, new severe headache, seizure, or SpO2 drop.
 F) Comprehensive Diagnostic Map:
 - Always provide a comprehensive_diagnostic_map in addition to recommended_workup.
+- Always provide action_pathway: what to do now, what if abnormal, what if normal but recurrent, what if red flag.
 - The map must show all relevant tests/images as a roadmap: must_do_now, same_day_if_available, conditional_next_step, specialist_level, not_indicated_now.
 - This is NOT permission to over-test. It explains WHEN each test/image becomes appropriate.
 - For neurologic concerns consider when triggered: CT brain, MRI brain, CTA/MRA head-neck, MRV/CTV, MRI spine, EEG, LP, EMG/NCS.
@@ -374,7 +384,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.5.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.6.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -409,13 +419,13 @@ Mandatory rules:
 9. If treatment/medication support is considered, generate questions_before_medication and medication safety questions.
 10. Imaging must be justified. Avoid over-testing and under-testing.
 11. Always provide comprehensive_diagnostic_map: include tests/images needed now, conditional tests/images, specialist-level tests, and tests/images not indicated now with exact triggers.
-12. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
-13. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
-14. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
+13. For palpitations + near-syncope, you MUST show Cardiology in activated_modules.
+14. For palpitations + near-syncope without focal neurologic signs, TIA must be low or cannot_rank, not medium/high.
+15. Evidence Verification must include source_title, source_organization, source_year_or_date when available,
     source_url_or_citation when available, exact_evidence_point, and limitations/caution.
-15. Medication support must never include dosing.
-16. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
-17. Return exactly according to schema.
+16. Medication support must never include dosing.
+17. Use clean Arabic medical language with useful English medical terms. Use "SOAP".
+18. Return exactly according to schema.
 
 {REFERENCE_FRAMEWORK}
 """
@@ -713,6 +723,72 @@ def _dedupe_by_key(items, key_fn):
     return out
 
 
+def _canonical_test_key(name):
+    t = _lc(name)
+    t = t.replace("resting", "").replace("standard", "")
+    if ("holter" in t or "ambulatory" in t or "event monitor" in t) and ("ecg" in t or "monitor" in t):
+        return "ambulatory_ecg"
+    if "ecg" in t or "electrocardiogram" in t:
+        return "12_lead_ecg"
+    if "orthostatic" in t:
+        return "orthostatic_bp_hr"
+    if "glucose" in t:
+        return "capillary_glucose"
+    if "bmp" in t or "electrolyte" in t or "renal" in t or "mg/ca" in t or "magnesium" in t or "calcium" in t:
+        return "bmp_electrolytes_renal_mg_ca"
+    if "cbc" in t:
+        return "cbc"
+    if "tsh" in t or "thyroid" in t:
+        return "tsh"
+    if "troponin" in t or "acs" in t:
+        return "troponin_acs"
+    if "d-dimer" in t or "d dimer" in t or "pe workup" in t:
+        return "d_dimer_pe"
+    if "echo" in t:
+        return "echocardiography"
+    if "ct brain" in t or "ct head" in t or ("ct" in t and "neuroimaging" in t):
+        return "ct_brain"
+    if "mri brain" in t or ("mri" in t and "neuroimaging" in t):
+        return "mri_brain"
+    if "cta" in t or "mra" in t:
+        return "cta_mra_head_neck"
+    if "eeg" in t:
+        return "eeg"
+    if "cardiology" in t and ("referral" in t or "consult" in t):
+        return "cardiology_referral"
+    return "".join(ch for ch in t if ch.isalnum() or ch == " ")[:60]
+
+
+def _timing_rank(timing):
+    order = {
+        "must_do_now": 0,
+        "urgent": 0,
+        "same_day_if_available": 1,
+        "important": 1,
+        "conditional_next_step": 2,
+        "routine": 3,
+        "specialist_level": 3,
+        "not_now": 4,
+        "not_indicated_now": 4,
+    }
+    return order.get(str(timing), 9)
+
+
+def _dedupe_tests_keep_stronger(items, name_getter, timing_getter):
+    best = {}
+    order = []
+    for item in items:
+        key = _canonical_test_key(name_getter(item))
+        if key not in best:
+            best[key] = item
+            order.append(key)
+        else:
+            old = best[key]
+            if _timing_rank(timing_getter(item)) < _timing_rank(timing_getter(old)):
+                best[key] = item
+    return [best[k] for k in order]
+
+
 def _question_key(txt):
     t = _lc(txt)
     if "complete syncope" in t or "loss of consciousness" in t or "إغماء كامل" in t:
@@ -764,8 +840,8 @@ def _append_workup_if_missing(a, test_name, type_, priority, why, changes, avoid
 
 
 def _append_diag_option_if_missing(a, test_or_image, category, timing, indication, trigger, why_not_now, changes, protocol, danger):
-    key = test_or_image.lower()
-    if not any(key in _lc(d.test_or_image) for d in a.comprehensive_diagnostic_map):
+    key = _canonical_test_key(test_or_image)
+    if not any(key == _canonical_test_key(d.test_or_image) for d in a.comprehensive_diagnostic_map):
         a.comprehensive_diagnostic_map.append(DiagnosticOption(
             test_or_image=test_or_image,
             category=category,
@@ -776,6 +852,18 @@ def _append_diag_option_if_missing(a, test_or_image, category, timing, indicatio
             what_result_would_change=changes,
             protocol_or_notes=protocol,
             danger_if_missed=danger
+        ))
+
+
+def _append_action_if_missing(a, step, when, action, reason, escalation):
+    key = _lc(step) + "|" + _lc(when)
+    if not any((_lc(x.step) + "|" + _lc(x.when)) == key for x in a.action_pathway):
+        a.action_pathway.append(ActionPathwayItem(
+            step=step,
+            when=when,
+            action=action,
+            reason=reason,
+            escalation=escalation
         ))
 
 
@@ -996,6 +1084,72 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
                         "(weakness, speech disturbance, vision loss/diplopia, ataxia) or the clinical picture changes."
                     )
 
+        # Action pathway: practical if/then plan.
+        _append_action_if_missing(a, "Immediate first-line tests", "now",
+            "Perform 12-lead ECG, orthostatic BP/HR, capillary glucose, and same-day BMP/electrolytes/renal function with Mg/Ca if available.",
+            "These address dangerous and reversible cardiac/metabolic/orthostatic causes.",
+            "Escalate if ECG abnormal, hypotension/shock, complete syncope, chest pain, severe dyspnea, SpO2 drop, seizure, or focal neurologic deficit."
+        )
+        _append_action_if_missing(a, "If ECG is abnormal", "if_abnormal",
+            "Treat as cardiac-risk presyncope/syncope and arrange urgent cardiology/ER pathway depending on abnormality and stability.",
+            "Arrhythmia, conduction disease, QT prolongation, or ischemic changes can explain near-syncope and may be dangerous.",
+            "Immediate ER/cardiology if unstable rhythm, ischemia, high-grade block, prolonged QT with symptoms, or persistent tachyarrhythmia."
+        )
+        _append_action_if_missing(a, "If orthostatic vitals are positive", "if_abnormal",
+            "Assess volume status, dehydration, bleeding/anemia, medication/substance causes, and manage fluid/status per clinician judgment.",
+            "Posture-related symptoms with objective BP/HR change support an orthostatic mechanism.",
+            "Escalate if severe hypotension, syncope, shock, or inability to stand safely."
+        )
+        _append_action_if_missing(a, "If ECG and basic tests are normal but episodes recur", "if_normal_but_recurrent",
+            "Use Holter/event monitor and consider cardiology referral; consider echo if murmur, abnormal ECG history, exertional/supine symptoms, or known heart disease.",
+            "Intermittent arrhythmias may be missed on a single ECG.",
+            "Escalate urgently if recurrence involves syncope, injury, exertion, chest pain, severe dyspnea, or abnormal vitals."
+        )
+        _append_action_if_missing(a, "If neurologic red flags appear", "if_red_flag",
+            "Switch to neurologic emergency pathway and consider CT/MRI brain, CTA/MRA, EEG, or other tests based on the red flag.",
+            "Focal deficit, seizure, severe new headache, ataxia/diplopia, or altered mental status changes the differential.",
+            "Immediate ER/stroke/seizure pathway if focal deficits, seizure, thunderclap headache, or altered mental status occur."
+        )
+
+        # Differential ranking cleanup.
+        has_arr = False
+        has_orth = False
+        for d in a.differential_diagnosis:
+            name = _lc(d.diagnosis_or_category)
+            if "arrhythm" in name:
+                d.probability = "high"
+                d.urgency = "same_day"
+                d.specialty_domain = "Cardiology"
+                has_arr = True
+            if "orthostatic" in name or "postural" in name:
+                if posture_related:
+                    d.probability = "high"
+                d.urgency = "same_day"
+                d.specialty_domain = "General Medicine / Cardiology"
+                has_orth = True
+        if not has_arr:
+            a.differential_diagnosis.insert(0, DifferentialItem(
+                diagnosis_or_category="Cardiac arrhythmia",
+                specialty_domain="Cardiology",
+                probability="high",
+                urgency="same_day",
+                supporting_features=["Palpitations with near-syncope", "Tachycardia"],
+                features_against=[],
+                missing_data_needed=["ECG", "rhythm during symptoms"],
+                confirm_or_exclude_step="12-lead ECG now; Holter/event monitor if ECG normal but episodes recur."
+            ))
+        if not has_orth:
+            a.differential_diagnosis.insert(1, DifferentialItem(
+                diagnosis_or_category="Orthostatic hypotension / postural presyncope",
+                specialty_domain="General Medicine / Cardiology",
+                probability="high" if posture_related else "medium",
+                urgency="same_day",
+                supporting_features=["Worse standing", "Improves sitting"],
+                features_against=[],
+                missing_data_needed=["Orthostatic BP/HR"],
+                confirm_or_exclude_step="Orthostatic BP/HR with symptoms recorded."
+            ))
+
         # Referral / ER thresholds.
         a.referral_or_er_threshold = (
             "Immediate ER/cardiology escalation if complete syncope, exertional syncope, chest pain, severe dyspnea, "
@@ -1016,6 +1170,10 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
             if "pmc3295536" in _lc(ev.source_url_or_citation) and ("tia" in _lc(ev.source_title) or "transient ischemic" in _lc(ev.source_title)):
                 ev.verification_status = "needs_manual_reference_check"
                 ev.caution = "Potential citation mismatch: verify that the URL actually matches the stated TIA source before relying on it."
+            if _has_any(ev.source_url_or_citation, ["heart.org/en/professional/clinical-resources"]) or _lc(ev.source_title).strip() in ["american heart association", "european society of cardiology"]:
+                if ev.verification_status == "verified_from_web_search":
+                    ev.verification_status = "needs_manual_reference_check"
+                    ev.caution = (ev.caution + " Source appears broad/general; verify exact guideline title and section before relying on this as strong evidence.").strip()
             if _has_any(ev.source_url_or_citation, ["heart.org/en/professional/clinical-resources", "clinical-resources"]) and _lc(ev.source_title).strip() in ["aha scientific statement on palpitations", "american heart association guidelines"]:
                 ev.verification_status = "needs_manual_reference_check"
                 ev.caution = "Generic organization page or nonspecific source title; verify the exact guideline/scientific statement before treating as strong evidence."
@@ -1040,9 +1198,11 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
     # Final dedupe again.
     a.activated_modules = _dedupe_by_key(a.activated_modules, lambda m: m.module)
     a.guideline_checklist = _dedupe_by_key(a.guideline_checklist, lambda g: (g.checklist_name.lower(), g.item.lower()))
-    a.recommended_workup = _dedupe_by_key(a.recommended_workup, lambda w: (w.type, w.test_or_action.lower()))
-    a.comprehensive_diagnostic_map = _dedupe_by_key(a.comprehensive_diagnostic_map, lambda d: (d.category, d.test_or_image.lower()))
+    a.recommended_workup = _dedupe_tests_keep_stronger(a.recommended_workup, lambda w: w.test_or_action, lambda w: w.priority)
+    a.comprehensive_diagnostic_map = _dedupe_tests_keep_stronger(a.comprehensive_diagnostic_map, lambda d: d.test_or_image, lambda d: d.timing)
     a.follow_up_thresholds = _dedupe_by_key(a.follow_up_thresholds, lambda f: (f.timeframe, f.situation.lower()))
+    a.action_pathway = _dedupe_by_key(a.action_pathway, lambda x: (_lc(x.when), _lc(x.step)))
+    a.comprehensive_diagnostic_map = sorted(a.comprehensive_diagnostic_map, key=lambda d: (_timing_rank(d.timing), d.category, d.test_or_image))
     return a
 
 
@@ -1051,7 +1211,7 @@ def apply_deterministic_guardrails(a: GuardAnalysis, context: str) -> GuardAnaly
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.5 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.6 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -1207,6 +1367,19 @@ def render(a):
             </div>
             """, unsafe_allow_html=True)
 
+    if a.action_pathway:
+        st.subheader("Action Pathway — ماذا أفعل الآن وماذا بعد النتائج؟")
+        for ap in a.action_pathway:
+            cls = "red-box" if ap.when == "if_red_flag" else ("orange-box" if ap.when in ["if_abnormal", "if_normal_but_recurrent"] else "green-box")
+            st.markdown(f"""
+            <div class='{cls}'>
+            <b>{ap.when}: {ap.step}</b><br>
+            <b>Action:</b> {ap.action}<br>
+            <b>Reason:</b> {ap.reason}<br>
+            <b>Escalation:</b> {ap.escalation}
+            </div>
+            """, unsafe_allow_html=True)
+
     if a.imaging_decision:
         st.subheader("Imaging Decision")
         for im in a.imaging_decision:
@@ -1350,7 +1523,7 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.5")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.6")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
@@ -1394,7 +1567,7 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.5")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.6")
 st.caption("الجديد: v4.7.4 — خريطة شاملة للفحوصات والصور + فحص سريري أقوى + Evidence أدق.")
 
 top = st.columns(10)
