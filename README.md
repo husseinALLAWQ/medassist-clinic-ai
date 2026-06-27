@@ -1,28 +1,22 @@
-# MedAssist Neuro Strict v4
+# MedAssist Neuro Ultra v4.1
 
-نسخة مخصصة أكثر لعلم الأعصاب وأكثر صرامة.
-
-## الميزات
-- Neurology-first
-- أسئلة إلزامية للصداع وسائر الحالات العصبية
-- فحص عصبي مفصل
-- تفسير واضح للفحص السريري:
-  - ماذا يعني الموجود
-  - localization
-  - ماذا يدعم
-  - ماذا ينفي جزئيًا ولا يستبعده كليًا
-  - ما الفحص أو الاختبار التالي
-- قرار تصوير صارم:
-  - لا CT/MRI لصداع أولي بسيط مع فحص عصبي طبيعي وبدون red flags
-- Screens for:
-  - Headache / migraine / raised ICP
-  - Seizure / syncope
-  - Stroke / TIA
-  - Dizziness / vertigo
-  - Neuropathy
-  - CSF leak
-- Medication safety mandatory
+هذه النسخة تجمع:
+- شكل Ultra v3 الواضح متعدد المراحل
+- صرامة Neuro Strict v4
+- خانة Clinical search / سؤال سريري سريع
+- Search saved reports
+- تفسير فحص سريري واضح
+- Neurology-first workflow
 - Trusted reference anchors داخل التحليل
+
+## المراحل
+1. Neuro Intake
+2. Strict Questions
+3. Clinical Exam
+4. Preliminary Dx & Workup
+5. Results / Imaging
+6. Full Review / Medication
+7. Report / Search
 
 ## Streamlit Secrets
 
