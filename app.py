@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 
 
 # =========================================================
-# MedAssist Neuro-General AutoEvidence Guard v4.7
+# MedAssist Neuro-General AutoEvidence Guard v4.7.1.1
 # Adds: staged questions before/after every clinical step
 # =========================================================
 
 st.set_page_config(
-    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7",
+    page_title="MedAssist Neuro-General AutoEvidence Guard v4.7.1.1",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -331,7 +331,7 @@ def get_api_key():
 
 def system_prompt(strictness: str):
     return f"""
-You are MedAssist Neuro-General AutoEvidence Guard v4.7.
+You are MedAssist Neuro-General AutoEvidence Guard v4.7.1.1.
 
 Identity:
 - Neurology-first but not neurology-only.
@@ -569,29 +569,38 @@ def run_automatic_evidence_search(stage, focus, body_system_focus, context, evid
     client = OpenAI(api_key=key)
     query = build_evidence_query(stage, focus, body_system_focus, context)
 
-    tool = {"type": "web_search"}
     if source_scope == "Authoritative medical domains only":
-        tool = {
-            "type": "web_search",
-            "filters": {"allowed_domains": AUTHORITATIVE_MEDICAL_DOMAINS}
-        }
+        query += "\n\nIMPORTANT SOURCE RULE: Prefer authoritative medical domains only. Search and use sources from this list when possible: " + ", ".join(AUTHORITATIVE_MEDICAL_DOMAINS) + ". If a source is not from this list, say why it was used."
 
-    try:
+    # Do NOT pass filters here. Some models reject web_search filters.
+    tool = {"type": "web_search"}
+
+    def _call(required: bool, selected_model: str):
         kwargs = dict(
-            model=evidence_model,
+            model=selected_model,
             tools=[tool],
             input=query,
         )
-        if force_search:
+        if required:
             kwargs["tool_choice"] = "required"
-
         response = client.responses.create(**kwargs)
         evidence_text = getattr(response, "output_text", None)
         if not evidence_text:
             evidence_text = str(response)
         return evidence_text[:20000]
-    except Exception as e:
-        return f"Automatic evidence search failed. Do not mark recommendations as web-verified. Error: {e}"
+
+    try:
+        return _call(force_search, evidence_model)
+    except Exception as e1:
+        # Fallback 1: same model, no required tool choice
+        try:
+            return "Automatic evidence search fallback used: same model without required tool_choice.\n\n" + _call(False, evidence_model)
+        except Exception as e2:
+            # Fallback 2: gpt-4o-mini, no required tool choice
+            try:
+                return "Automatic evidence search fallback used: gpt-4o-mini without required tool_choice.\n\n" + _call(False, "gpt-4o-mini")
+            except Exception as e3:
+                return f"Automatic evidence search failed. Do not mark recommendations as web-verified. Errors: primary={e1}; fallback1={e2}; fallback2={e3}"
 
 
 
@@ -622,7 +631,7 @@ def run_ai(stage, focus, body_system_focus, strictness, context, files, model):
 # =========================================================
 
 def report_markdown(a):
-    return "# MedAssist Neuro-General AutoEvidence Guard v4.7 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
+    return "# MedAssist Neuro-General AutoEvidence Guard v4.7.1.1 Report\n\n```json\n" + a.model_dump_json(indent=2) + "\n```"
 
 
 def save_report(context, a):
@@ -903,11 +912,11 @@ def render(a):
 # =========================================================
 
 with st.sidebar:
-    st.title("🧠 Neuro-General AutoEvidence Guard v4.7")
+    st.title("🧠 Neuro-General AutoEvidence Guard v4.7.1")
     model = st.text_input("OpenAI model", value=DEFAULT_MODEL)
     auto_evidence_search = st.checkbox("Automatic Evidence Web Search", value=True)
     evidence_model = st.text_input("Evidence search model", value="gpt-4.1-mini")
-    evidence_source_scope = st.selectbox("Evidence source scope", ["Authoritative medical domains only", "Broad web search"], index=0)
+    evidence_source_scope = st.selectbox("Evidence source scope", ["Authoritative medical domains only", "Broad web search"], index=0, help="In v4.7.1 this is enforced by prompt, not by API filters, to avoid model compatibility errors.")
     strictness = st.selectbox("Safety strictness", ["Very strict", "Strict", "Balanced"], index=0)
     focus = st.selectbox("Neurology focus", [
         "General Neurology",
@@ -947,8 +956,8 @@ with st.sidebar:
 # Main UI
 # =========================================================
 
-st.title("MedAssist Neuro-General AutoEvidence Guard v4.7")
-st.caption("الجديد: Automatic Evidence Web Search + Evidence Verification + أسئلة قبل/بعد كل مرحلة.")
+st.title("MedAssist Neuro-General AutoEvidence Guard v4.7.1.1")
+st.caption("الجديد: Automatic Evidence Web Search بدون filters غير مدعومة + Evidence Verification + أسئلة قبل/بعد كل مرحلة.")
 
 top = st.columns(10)
 top[0].metric("1", "Intake")

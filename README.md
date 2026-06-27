@@ -1,40 +1,29 @@
-# MedAssist Neuro-General AutoEvidence Guard v4.7
+# MedAssist Neuro-General AutoEvidence Guard v4.7.1
 
-هذه النسخة تضيف بحثًا أوتوماتيكيًا في المصادر الطبية المفتوحة قبل إعطاء النتيجة.
+هذه نسخة إصلاحية من v4.7.
 
-## الجديد
-- Automatic Evidence Web Search
-- بحث تلقائي قبل التحليل عبر OpenAI Responses API web_search tool
-- اختيار نطاق المصادر:
-  - Authoritative medical domains only
-  - Broad web search
-- Evidence search model مستقل، افتراضيًا: gpt-4.1-mini
-- Evidence Verification يميز بين:
-  - automatic_web_search / verified_from_web_search
-  - uploaded_guideline_or_reference / verified_from_uploaded_material
-  - built_in_guideline_framework / framework_based_not_live_checked
-  - clinical_reasoning_only
-  - not_verified_live
-  - needs_specialist_review
+## سبب الإصلاح
+في بعض موديلات OpenAI مثل `gpt-4.1-mini` يظهر خطأ:
+`Parameter 'filters' not supported with model...`
+
+لذلك أزلنا `filters` من أداة `web_search`.
+الآن اختيار "Authoritative medical domains only" يتم عبر تعليمات داخل نص البحث، وليس عبر API filters.
+
+## الجديد في v4.7.1
+- Automatic Evidence Web Search بدون filters غير مدعومة
+- Fallback تلقائي إذا فشل البحث:
+  1. نفس الموديل بدون `tool_choice=required`
+  2. fallback إلى `gpt-4o-mini`
+- Evidence Verification يوضح هل النتيجة:
+  - verified_from_web_search
+  - framework_based_not_live_checked
+  - not_live_verified
+  - needs_manual_reference_check
 
 ## مهم
-- لا يستطيع فتح UpToDate أو مصادر مدفوعة إلا إذا كان لديك وصول مرخص/API خاص.
-- البحث يعتمد على المصادر الطبية المفتوحة والمتاحة على الويب.
-- يجب على الطبيب مراجعة المصادر والحكم النهائي.
-
-## التسلسل
-1. Intake
-2. Neuro Screen
-3. General Medicine Screen
-4. Evidence / Guidelines
-5. Questions Before Exam
-6. Exam Protocol: كيف أفحص؟
-7. Enter Exam Findings
-8. Questions After Exam
-9. Dx & Workup
-10. Results / Imaging
-11. Full Review / Medication
-12. Report / Search
+- البحث في المصادر المفتوحة المتاحة على الويب.
+- لا يفتح UpToDate أو مصادر مدفوعة إلا إذا كان لديك وصول مرخص/API.
+- القرار النهائي للطبيب.
 
 ## Streamlit Secrets
 
